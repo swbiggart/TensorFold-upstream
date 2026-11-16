@@ -11,6 +11,11 @@ pub const Hook = ?*const fn (*anyopaque, cuda.startup_watch.Phase) void;
 pub fn readiness(h: anytype, comptime F: type) void {
     if (@hasDecl(F, "startup_phase")) h.startup_phase = F.startup_phase;
     if (@hasDecl(F, "healthy")) h.health = .{ .ctx = h.family, .read = F.healthy };
+    if (@hasDecl(F, "kv_source")) h.kv_source = .{ .ctx = h.family, .read = struct {
+        fn read(ctx: *anyopaque) ?api.Status.Kv {
+            return if (F.kv_source(ctx)) |k| .from(k) else null;
+        }
+    }.read };
 }
 fn note(h: anytype, phase: cuda.startup_watch.Phase) void {
     if (h.startup_phase) |callback| callback(h.family, phase);
@@ -33,6 +38,7 @@ pub fn serve(h: anytype, io: std.Io, facts: lanes.Model, rows: u32, info: api.In
     h.host.memory = if (h.gpu != null) .{ .read = family_memory.read } else null;
     h.host.explain = explain;
     h.host.health = @import("cuda_readiness.zig").source(h);
+    h.host.kv_source = h.kv_source;
     h.host.cache = h.store;
     h.host.warm_quiet = if (info.warm_turns) nemotron.native.warm_quiet else 0;
     if (h.lone != null) h.host.lone = .{ .ctx = h, .run = callbacks.loneRun, .sampled = true, .logprobs = h.inner.vtable.first_row != null, .structures = h.inner.vtable.first_masked != null, .min_budget = nemotron.native.lone_min_budget, .resumes = true };

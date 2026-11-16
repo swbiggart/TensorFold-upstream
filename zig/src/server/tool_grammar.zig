@@ -7,6 +7,7 @@ const prompt = @import("prompt.zig");
 const tool_specs = @import("tool_specs.zig");
 const lfm2 = @import("tool_grammar_lfm2.zig");
 const deepseek = @import("tool_grammar_deepseek.zig");
+const inkling2 = @import("inkling2_grammar.zig");
 const Server = @import("server.zig").Server;
 const Value = json.Value;
 const Cx = errors.Cx;
@@ -42,6 +43,8 @@ const mm = "]<]minimax[>[";
 
 /// The grammar for a reply that must call one of `tools`: one call, or (`parallel`) one or more, then the end.
 pub fn structure(srv: *Server, cx: *Cx, tools: []const Value, parallel: bool, thinking: bool) errors.Refused!api.Structure {
+    // Inkling 2's calls are typed reply parts, not markup in text: its own grammar (inkling2_grammar.zig)
+    if (srv.text.vtable.format == .inkling2) return inkling2.toolStructure(srv, cx, tools, parallel, thinking);
     const rendered = try probed(srv, cx);
     const s = style(rendered) orelse .json; // unrecognized markup uses the canonical call form the parser accepts
     const text = if (lfm2.isStyle(rendered, probe, key)) try lfm2.build(cx.a, tools, parallel) else try build(cx.a, s, tools, parallel);
@@ -54,6 +57,7 @@ pub fn structure(srv: *Server, cx: *Cx, tools: []const Value, parallel: bool, th
 
 /// An auto reply's grammar: free text or calls, strict tools' arguments in their schema; null for LFM2's markup.
 pub fn optionalStructure(srv: *Server, cx: *Cx, tools: []const Value, all: bool, parallel: bool, thinking: bool) errors.Refused!?api.Structure {
+    if (srv.text.vtable.format == .inkling2) return null; // auto stays unconstrained on Inkling 2 (its replies as before)
     const rendered = try probed(srv, cx);
     if (lfm2.isStyle(rendered, probe, key)) return null; // its call list is one grammar rule, not a tag a trigger opens
     const text = try optional(cx.a, style(rendered) orelse .json, tools, all, parallel);
@@ -213,7 +217,7 @@ fn call(a: Allocator, s: Style, name: []const u8, schema: Value) Allocator.Error
 }
 
 /// The tool's parameter schema (OpenAI's function.parameters, a bare tool's parameters or input_schema).
-fn parameters(a: Allocator, tool: Value) Allocator.Error!Value {
+pub fn parameters(a: Allocator, tool: Value) Allocator.Error!Value {
     const function = if (tool.get("function")) |f| (if (f == .object) f else tool) else tool;
     for ([_][]const u8{ "parameters", "input_schema" }) |k| if (function.get(k)) |p| if (p == .object) return p;
     const empty = try json.newObject(a);

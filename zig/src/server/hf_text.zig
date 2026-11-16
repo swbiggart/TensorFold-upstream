@@ -5,6 +5,7 @@ const template = @import("template");
 const json = @import("json");
 const model_text = @import("model_text.zig");
 const KimiText = @import("kimi_text.zig").KimiText;
+const inkling2_reply = @import("inkling2_reply.zig");
 const dsv41_chat = @import("dsv41_chat");
 const dsv41 = if (@hasDecl(dsv41_chat, "template")) dsv41_chat.template else dsv41_chat;
 const Value = json.Value;
@@ -31,6 +32,7 @@ pub const HfText = struct {
     native_kimi: ?*KimiText = null,
     source: []const u8 = "",
     native_deepseek: bool = false,
+    inkling2: bool = false, // Inkling 2: typed reply parts, its effort line, its extra stops (inkling2_reply.zig)
     schema_prompt: bool = true, // TF_DSV41_SCHEMA_PROMPT: response_format's schema as the encoder's ``## Response Format``
     overridden: bool = false, // the chat template is --chat-template's file
     unread_template: bool = false, // a native DeepSeek checkpoint's own Jinja, which its encoder replaces
@@ -120,6 +122,8 @@ pub const HfText = struct {
             t.schema_prompt = try schemaPrompt(if (std.c.getenv("TF_DSV41_SCHEMA_PROMPT")) |v| std.mem.span(v) else null);
         }
         t.specials = try specialsOf(a, config);
+        const inkling2_type = model_config == .object and if (model_config.object.get("model_type")) |kind| kind == .string and std.mem.eql(u8, kind.string, "inkling2") else false;
+        t.inkling2 = inkling2_type or inkling2_reply.isTemplate(t.source);
         t.eos = t.eosIds(a, model_config, generation, config, t.tok.id_to_token.tokens.items.len) catch |e| {
             if (e == error.OutOfMemory) return e;
             problem.* = try std.fmt.allocPrint(pa, "invalid checkpoint EOS ({s})", .{@errorName(e)});
@@ -233,6 +237,10 @@ pub const HfText = struct {
             };
             if (t.tok.specialTokenId(piece)) |id| try tokenizer.eos.appendId(a, &out, id, bound);
         };
+        // Inkling 2: another speaker's header or the text end also ends a reply, after config.json's 200006
+        if (t.inkling2) for (inkling2_reply.extra_stops) |m| {
+            if (t.tok.specialTokenId(m.spelling())) |id| try tokenizer.eos.appendId(a, &out, id, bound);
+        };
         return out.toOwnedSlice(a);
     }
 
@@ -285,23 +293,30 @@ pub const HfText = struct {
         }
     }
 
+    const vtable: model_text.Text.VTable = .{
+        .encode = encodeFn,
+        .decode = decodeFn,
+        .token_id = tokenIdFn,
+        .token_string = tokenStringFn,
+        .vocab_size = vocabFn,
+        .eos_ids = eosFn,
+        .added = addedFn,
+        .render = renderFn,
+        .template_source = sourceFn,
+        .special = specialFn,
+        .token_bytes = tokenBytesFn,
+        .encode_plain = encodePlainFn,
+        .encode_masked = encodeMaskedFn,
+    };
+    const inkling2_vtable: model_text.Text.VTable = blk: {
+        var with = vtable;
+        with.format = .inkling2;
+        break :blk with;
+    };
+
     pub fn text(t: *HfText) model_text.Text {
         if (t.native_kimi) |kimi| return kimi.text();
-        return .{ .native_deepseek = t.native_deepseek and t.compiled == null, .ctx = t, .vtable = &.{
-            .encode = encodeFn,
-            .decode = decodeFn,
-            .token_id = tokenIdFn,
-            .token_string = tokenStringFn,
-            .vocab_size = vocabFn,
-            .eos_ids = eosFn,
-            .added = addedFn,
-            .render = renderFn,
-            .template_source = sourceFn,
-            .special = specialFn,
-            .token_bytes = tokenBytesFn,
-            .encode_plain = encodePlainFn,
-            .encode_masked = encodeMaskedFn,
-        } };
+        return .{ .native_deepseek = t.native_deepseek and t.compiled == null, .ctx = t, .vtable = if (t.inkling2) &inkling2_vtable else &vtable };
     }
 
     pub fn identity(t: *const HfText, a: Allocator) Allocator.Error![32]u8 {
@@ -451,6 +466,7 @@ test "model EOS does not hide a different tokenizer chat end" {
     defer arena.deinit();
     const a = arena.allocator();
     var t: HfText = undefined;
+    t.inkling2 = false;
     t.tok.vocab = std.StringHashMap(u32).init(a);
     try t.tok.vocab.put("<|im_end|>", 248046);
     const model = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"text_config\":{\"eos_token_id\":248044}}", .{});

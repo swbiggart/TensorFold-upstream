@@ -5,6 +5,7 @@ const uni = @import("unicode.zig");
 const access = @import("access.zig");
 const methods = @import("methods.zig");
 const pyjson = @import("pyjson.zig");
+const pyfloat = @import("pyfloat.zig");
 const eval = @import("eval.zig");
 const Value = v.Value;
 const Error = v.Error;
@@ -12,7 +13,7 @@ const Kw = methods.Kw;
 const Ctx = eval.Ctx;
 const bind = methods.bind;
 
-pub const implemented = [_][]const u8{ "default", "d", "length", "count", "string", "trim", "upper", "lower", "capitalize", "safe", "tojson", "fromjson", "items", "dictsort", "join", "list", "map", "first", "last", "unique", "reverse", "sort", "select", "reject", "selectattr", "rejectattr", "indent", "replace", "escape", "e" };
+pub const implemented = [_][]const u8{ "default", "d", "length", "count", "string", "trim", "upper", "lower", "capitalize", "safe", "tojson", "fromjson", "float", "items", "dictsort", "join", "list", "map", "first", "last", "unique", "reverse", "sort", "select", "reject", "selectattr", "rejectattr", "indent", "replace", "escape", "e" };
 const jinja_filters = [_][]const u8{ "abs", "attr", "batch", "capitalize", "center", "count", "d", "default", "dictsort", "e", "escape", "filesizeformat", "first", "float", "forceescape", "format", "groupby", "indent", "int", "items", "join", "last", "length", "list", "lower", "map", "max", "min", "pprint", "random", "reject", "rejectattr", "replace", "reverse", "round", "safe", "select", "selectattr", "slice", "sort", "string", "striptags", "sum", "title", "tojson", "trim", "truncate", "unique", "upper", "urlencode", "urlize", "wordcount", "wordwrap", "xmlattr" };
 pub const tests = [_][]const u8{ "odd", "even", "divisibleby", "defined", "undefined", "filter", "test", "none", "boolean", "false", "true", "integer", "float", "string", "mapping", "number", "sequence", "iterable", "callable", "sameas", "escaped", "in", "==", "eq", "equalto", "!=", "ne", ">", "gt", "greaterthan", ">=", "ge", "<", "lt", "lessthan", "<=", "le" };
 const jinja_tests = tests ++ [_][]const u8{ "lower", "upper" };
@@ -210,6 +211,23 @@ pub fn filter(c: *Ctx, name: []const u8, value: Value, pos: []const Value, kw: [
         const text = try softStr(c, value);
         const parsed = std.json.parseFromSliceLeaky(std.json.Value, rt.a, text.s, .{}) catch return rt.fail("fromjson: not JSON: {s}", .{text.s});
         return pyjson.fromJsonDerived(rt, parsed, text.spans.len > 0);
+    }
+    if (eq(u8, name, "float")) { // Jinja2's do_float: float(value), its default where Python raises TypeError or ValueError
+        const b = try bind(rt, "float", &.{"default"}, 0, pos, kw);
+        const fallback = b[0] orelse Value{ .float = 0 };
+        return switch (value) {
+            .float => value,
+            .int => |i| .{ .float = @floatFromInt(i) },
+            .boolean => |x| .{ .float = if (x) 1 else 0 },
+            .big => |s| blk: {
+                const f = std.fmt.parseFloat(f64, s) catch return rt.fail("int too large to convert to float", .{});
+                if (std.math.isInf(f)) return rt.fail("int too large to convert to float", .{});
+                break :blk .{ .float = f };
+            },
+            .str => |s| if (try pyfloat.parse(rt.a, s.s)) |f| .{ .float = f } else fallback,
+            .missing, .undef => rt.fail("{s}", .{v.undefMsg(value)}),
+            else => fallback,
+        };
     }
     if (eq(u8, name, "items")) {
         if (v.isUndef(value)) return rt.iter(&.{}, null);

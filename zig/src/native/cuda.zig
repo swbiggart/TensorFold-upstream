@@ -23,6 +23,7 @@ const vision_offer = @import("cuda_vision_offer.zig");
 const drafted = @import("cuda_drafted.zig");
 const kv_pages = @import("cuda_kv_pool.zig");
 const cuda_families = @import("cuda_families.zig");
+const inkling2 = @import("inkling2_serve").native;
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
 pub const registry = cuda_families.registry;
 /// --record opens here (engines.zig refuses it for a backend without this).
@@ -72,6 +73,7 @@ pub const Host = struct {
     dir: []u8 = &.{}, // the model folder the learner writes its lessons into
     follow_fn: ?*const fn (*anyopaque) anyerror!void = null,
     health: ?api.HealthSource = null,
+    kv_source: ?api.KvSource = null, // a family's own KV page pool counts (`kv_source`), for /health
     startup_phase: @import("cuda_startup_phase.zig").Hook = null,
     recording: ?*record.Recording = null, // --record: the recorder in front of the family's backend
     served: drafted.Served = .{ .backend = undefined, .facts = .{}, .stream_bytes = 0 }, // the family's backend, wrapped with --drafter's draft model when given
@@ -146,7 +148,7 @@ pub const Host = struct {
     /// The family's backend, each call made with the context current on the calling thread.
     fn backend(h: *Host) lanes.backend.Backend {
         h.vtable = lane_backend.vtable(Host, h.inner.vtable.*);
-        return .{ .ptr = h, .round_observer = h.inner.round_observer, .vtable = &h.vtable, .first_before_draft = h.inner.first_before_draft, .penalties = h.inner.penalties, .chunk_invariant = h.inner.chunk_invariant };
+        return .{ .ptr = h, .round_observer = h.inner.round_observer, .vtable = &h.vtable, .first_before_draft = h.inner.first_before_draft, .penalties = h.inner.penalties, .chunk_invariant = h.inner.chunk_invariant, .late_masks = h.inner.late_masks };
     }
 };
 const refusals = @import("cuda_refusal.zig");
@@ -236,6 +238,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         problem.* = try std.fmt.allocPrint(a, "{s}{d}: this machine has {d} CUDA device{s} (0 to {d})", .{ named, device, count, if (count == 1) "" else "s", @max(count, 1) - 1 });
         return null;
     }
+    // TF_CUDA_SCHED: how the host waits for the device (spin, yield, blocking; host scheduling only)
+    if (cuda.Context.scheduleFromEnv()) |s| try cuda.Context.setSchedule(&g.driver, @intCast(device), s);
     g.ctx = try cuda.Context.init(&g.driver, @intCast(device));
     defer if (!opened) g.ctx.deinit();
     bound = &g.ctx;
@@ -351,7 +355,13 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         low = try std.fmt.allocPrint(a, " on rank {d}, the smallest room of the ranks", .{pr.rank});
     };
     const free = loaded.free_streams;
-    const counted = try @import("cuda_streams.zig").count(F, a, loaded, o, .{ .room = room, .model = model, .reserve = after.reserve, .low = low, .window = window, .stream_bytes = served.stream_bytes, .host_cache = host_cache, .host_budget = staging_budget, .share = share }, problem) orelse return null;
+    // a family that counted its streams from every rank's room (Inkling-2: --context sets them) serves exactly those
+    var asked = o;
+    if (@hasField(L, "streams")) if (loaded.streams) |n| {
+        asked.lanes = n;
+        asked.lanes_fixed = true;
+    };
+    const counted = try @import("cuda_streams.zig").count(F, a, loaded, asked, .{ .room = room, .model = model, .reserve = after.reserve, .low = low, .window = window, .stream_bytes = served.stream_bytes, .host_cache = host_cache, .host_budget = staging_budget, .share = share }, problem) orelse return null;
     const streams = counted.streams;
     const held = served.stream_bytes * (streams -| free);
     const cache_room = @import("cuda_streams.zig").cacheRoom(room, served.stream_bytes, free, counted);
@@ -397,6 +407,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
             h.store = null;
         }
         try kv_pages.store(F, store, loaded, kept); // its snapshot slots, before a disk probe takes one
+        if (comptime @hasDecl(F, "snap_store")) F.snap_store(loaded.target, h, StoreReclaim.giveBack, StoreReclaim.borrowed);
         h.store = store;
         if (o.learn_conversations) if (o.learn) |root| {
             if (F == nemotron.native) try cuda_disk.attach(a, io, &g.ctx, o, root, kernels, loaded, store);
@@ -438,7 +449,9 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         std.log.info("recording each stream's rows under {s}/{s}", .{ dir, r.recorder.name });
     }
     errdefer if (h.recording) |r| r.free(gpa);
-    const admit: ?api.Admit = if (comptime !@hasDecl(F, "fits")) null else if (paged != null) .{ .ctx = loaded.ctx, .fits = F.fits } else null;
+    // a paged plan's pool, or a family that pages its own streams (Loaded.admits: Inkling-2's KV page pool), admits by fit
+    const own_pages = if (comptime @hasField(@TypeOf(loaded), "admits")) loaded.admits else false;
+    const admit: ?api.Admit = if (comptime !@hasDecl(F, "fits")) null else if (paged != null or own_pages) .{ .ctx = loaded.ctx, .fits = F.fits } else null;
     h.kv = kv_pages.watchOf(F, loaded, paged);
     h.kv_count = if (admit != null) kv_pages.ledgerPool(F, loaded) else null;
     const bench = if (@hasDecl(F, "benchmark")) F.benchmark(loaded.ctx) else api.Benchmark{ .ranks = 1 };
@@ -537,6 +550,9 @@ test "CUDA host preserves prefill_step, first-before-draft and chunk-invariance 
     try std.testing.expect(h.backend().chunk_invariant); // the fake declares it; the wrapper must carry it
     h.inner.chunk_invariant = false;
     try std.testing.expect(!h.backend().chunk_invariant);
+    try std.testing.expect(!h.backend().late_masks); // a grammar stream's late masks (Backend.late_masks): carried too
+    h.inner.late_masks = true;
+    try std.testing.expect(h.backend().late_masks);
 }
 
 test "a cancel during a long prompt stops it, and the next request's reply is unchanged (#291)" {
@@ -582,6 +598,12 @@ test "slide admission: cuda refuses before checkpoint or device access" {
     try @import("slide_open_test.zig").check(open, "CUDA", &.{ "qwen4", "qwen4_text", "lfm2_vl", "glm5_next", "gemma4", "fish_omni", "qwen3" });
 }
 
+test "inkling2 on CUDA is a registered family that takes --tp ranks and no drafter" {
+    try std.testing.expectEqualStrings("inkling2", inkling2.model_type);
+    try std.testing.expect(refusals.family(inkling2, .{ .dir = "d", .model_type = "inkling2", .tp = 4, .rank = 3 }) == null);
+    try std.testing.expect(refusals.family(inkling2, .{ .dir = "d", .model_type = "inkling2", .drafter = "x" }) != null);
+}
+
 test "qwen3 on CUDA refuses the flags it does not serve by name, before any checkpoint or device access" {
     try @import("cuda_qwen3_test.zig").flags(open);
     try @import("cuda_qwen3_test.zig").kernels(open);
@@ -591,3 +613,34 @@ test {
     _ = @import("copy_drafts_cuda_test.zig");
     _ = cuda_families;
 }
+
+/// A family keeping prompts on its own pages (Inkling-2's KV page pool, `snap_store`): the store gives kept states
+/// back, least valuable first and never a borrowed one, and when `guarded` nor one a queued or admitted request will
+/// resume (the lane host's protection; the family asks unguarded only when no other stream runs), until the family's
+/// pages fit, and says whether a state is borrowed (a resume in flight). Engine thread only, as the store; `ctx` is
+/// the Host.
+const StoreReclaim = struct {
+    fn giveBack(ctx: *anyopaque, restoring: ?*anyopaque, left: *anyopaque, fit: *const fn (*anyopaque) bool, guarded: bool) bool {
+        const h: *Host = @ptrCast(@alignCast(ctx));
+        const Left = struct {
+            p: *anyopaque,
+            f: *const fn (*anyopaque) bool,
+            pub fn fits(l: @This()) bool {
+                return l.f(l.p);
+            }
+        };
+        const l: Left = .{ .p = left, .f = fit };
+        if (guarded and h.host.cache != null) return h.host.giveBackGuarded(restoring, l);
+        const store = h.store orelse return false;
+        const before = store.reservation_guard;
+        store.reservation_guard = null; // unguarded: no admission lookup's protection either
+        defer store.reservation_guard = before;
+        return store.giveBack(restoring, &.{}, l);
+    }
+
+    fn borrowed(ctx: *anyopaque, saved: *anyopaque) bool {
+        const h: *Host = @ptrCast(@alignCast(ctx));
+        const store = h.store orelse return false;
+        return store.borrowed(saved);
+    }
+};

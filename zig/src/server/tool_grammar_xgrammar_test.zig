@@ -142,3 +142,7 @@ test "auto tools through xgrammar: non-strict now takes any object, strict looku
     };
     try std.testing.expectEqual(@as(usize, 0), wrong);
 }
+
+test {
+    _ = @import("inkling2_grammar_xgrammar_test.zig");
+}
