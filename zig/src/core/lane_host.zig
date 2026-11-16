@@ -68,6 +68,7 @@ pub const LaneHost = struct {
     decoded_rows: bool = false, // the backend prefills Request.decode_spans with decoded rows' arithmetic, cache or not
     health: ?api.HealthSource = null,
     fsr: ?@import("engine_status.zig").FsrSource = null, // the backend's SSD-expert cache counts; null: Status.fsr stays null
+    kv_source: ?@import("engine_status.zig").KvSource = null, // the backend's KV page pool counts; null: Status.kv stays null
     frame_key: ?*const fn (images: []const api.Image) u32 = null, // a family's image frame (0: text's), in the cache key
     memory: ?api.MemorySource = null, // the backend's memory counts; null: Engine.memory reports none
     explain: ?api.Explain = null, // the backend's words for a request it refuses; null: the error's name
@@ -312,7 +313,7 @@ pub const LaneHost = struct {
         h.gpa.free(job.marks);
         h.gpa.free(job.key);
         const s = &job.stream;
-        const stats: Stats = if (job.started) .{ .rounds = s.rounds, .grammar = if (s.grammar_time.windows > 0) s.grammar_time else null, .drafted = s.drafted, .accepted = s.accepted, .min_rows = s.min_rows, .prefill_widths = s.prefill_widths.items, .loop_period = s.loop_period, .gpu_seconds = s.gpu_seconds, .prefill_seconds = if (job.prefilled) |done| @as(f64, @floatFromInt(@as(i64, @intCast(@max(0, done - job.began))))) / 1e9 else null } else .{};
+        const stats: Stats = if (job.started) .{ .rounds = s.rounds, .grammar = if (s.grammar_time.windows > 0) s.grammar_time else null, .drafted = s.drafted, .accepted = s.accepted, .min_rows = s.min_rows, .prefill_widths = s.prefill_widths.items, .loop_period = s.loop_period, .gpu_seconds = s.gpu_seconds, .depth_rounds = s.depth_rounds, .depth_kept = s.depth_kept, .kept_rounds = s.kept_rounds, .stale_drafts = s.stale_drafts, .draft_gap_ms = if (s.draft_gaps > 0) @as(f64, @floatFromInt(s.draft_gap_ns)) / 1e6 / @as(f64, @floatFromInt(s.draft_gaps)) else null, .prefill_seconds = if (job.prefilled) |done| @as(f64, @floatFromInt(@as(i64, @intCast(@max(0, done - job.began))))) / 1e9 else null } else .{};
         var told = if (job.started) recalls.finished(h, job, reason, stats) else stats;
         told.queued_seconds = if (job.admitted_ns) |at| @as(f64, @floatFromInt(@max(0, at - job.submitted))) / 1e9 else 0;
         emit(job, .{ .finished = .{ .reason = reason, .stats = told, .message = message } });
@@ -323,6 +324,12 @@ pub const LaneHost = struct {
             recalls.release(job);
         }
         h.gpa.destroy(job);
+    }
+
+    /// Kept prompt states give their storage back for a backend's own pages (lane_cache_queue.zig giveBack: the
+    /// queued and admitted requests' resumptions protected). Engine thread, outside the lock.
+    pub fn giveBackGuarded(h: *LaneHost, restoring: ?pc.Saved, left: anytype) bool {
+        return @import("lane_cache_queue.zig").giveBack(h, restoring, left);
     }
 
     pub fn lock(h: *LaneHost) void {

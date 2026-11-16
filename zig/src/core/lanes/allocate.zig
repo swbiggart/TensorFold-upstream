@@ -23,6 +23,15 @@ pub const HeadCost = struct {
     free_first: bool = false,
     row_ms: f64 = 0.0, // what each row past a stream's first costs past the table on this machine (below it: less)
     least_rows: u64 = 0, // a measuring round reaches this many rows, the likeliest nodes first, whatever they cost
+    pass_ms: f64 = 0.0, // a drafter's own pass: once a round any stream drafts in (the round without drafts has none)
+    first_ms: f64 = 0.0, // and its share a drafting stream (charged at the stream's first draft)
+    margin: f64 = 1.0, // drafts must beat the round without them by this factor (estimates near the line are noise)
+    /// Per stream (as `probs`), what its round costs past the shallow price at c drafts (`depth[s][c]`, c from 0 to its
+    /// chain's length): a stream deep in its context pays for its window's rows and its draft over that context
+    /// (depth.zig Rule.depthMs). Empty: none (the allocation as before). With it, the next node is the one with the
+    /// most chance a ms it adds (the table's next row, its depth, a stream's first its share of the pass), the likeliest
+    /// among equal ms.
+    depth: []const []const f64 = &.{},
 };
 
 /// allocate, each stream's drafts past its first costing one more head step.
@@ -47,20 +56,32 @@ pub fn allocateDrafts(gpa: Allocator, fixed: []const u32, probs: []const []const
     var live: u64 = 0;
     for (fixed) |f| live += @intFromBool(f > 0);
     const least = @min(head.least_rows, max_rows);
-    var best = if (rows >= least) rate(costs, timed, rows, expected, overhead_ms + rowTerm(costs, timed, head, rows, live)) else -std.math.inf(f64);
+    const deep = head.depth.len == probs.len;
+    var depth_ms: f64 = 0; // the streams' depth at their counts (head.depth)
+    if (deep) for (head.depth) |d| {
+        depth_ms += d[0];
+    };
+    var best = if (rows >= least) head.margin * rate(costs, timed, rows, expected, overhead_ms + depth_ms + rowTerm(costs, timed, head, rows, live)) else -std.math.inf(f64);
     while (rows < max_rows) {
-        // the likeliest next node, ties to the lowest stream (Python's heapq of (-p, stream))
+        // the likeliest next node, ties to the lowest stream (Python's heapq of (-p, stream)); with depth, the most
+        // chance a ms it adds (the table's next row is the same for every stream)
+        const row: f64 = if (!deep) 0 else if (timed) @max(1e-3, (costs.get(@intCast(rows + 1)) orelse 0) - (costs.get(@intCast(rows)) orelse 0) + head.row_ms) else 1.0;
         var pick: ?usize = null;
         var pick_p: f64 = 0.0;
+        var pick_ms: f64 = 0.0;
         for (probs, 0..) |p, s| {
             if (counts[s] >= p.len) continue;
             const v = p[counts[s]];
-            if (pick == null or v > pick_p) {
+            const ms = if (deep) row + @max(0, head.depth[s][counts[s] + 1] - head.depth[s][counts[s]]) + (if (counts[s] == 0) head.first_ms else 0) else 0;
+            const better = if (ms == pick_ms) v > pick_p else v * pick_ms > pick_p * ms;
+            if (pick == null or better) {
                 pick = s;
                 pick_p = v;
+                pick_ms = ms;
             }
         }
         const s = pick orelse break;
+        if (deep) depth_ms += head.depth[s][counts[s] + 1] - head.depth[s][counts[s]];
         counts[s] += 1;
         firsts += @intFromBool(counts[s] == 1);
         rows += 1;
@@ -69,7 +90,8 @@ pub fn allocateDrafts(gpa: Allocator, fixed: []const u32, probs: []const []const
         expected += pick_p;
         const steps: f64 = @floatFromInt(if (head.batched) deepest -| @intFromBool(head.free_first) else drafts - (if (head.free_first) firsts else 0));
         if (rows < least) continue;
-        const now = rate(costs, timed, rows, expected, overhead_ms + head.step_ms * steps + rowTerm(costs, timed, head, rows, live));
+        const pass = head.pass_ms + head.first_ms * @as(f64, @floatFromInt(firsts));
+        const now = rate(costs, timed, rows, expected, overhead_ms + depth_ms + head.step_ms * steps + pass + rowTerm(costs, timed, head, rows, live));
         if (now > best or (!timed and head.step_ms == 0)) {
             best = now;
             @memcpy(best_counts, counts);
@@ -150,6 +172,31 @@ pub fn extendCosts(gpa: Allocator, costs: []const Cost, rows: u32) !Table {
 fn find(costs: []const Cost, width: u32) ?f64 {
     for (costs) |c| if (c.width == width) return c.ms;
     return null;
+}
+
+test "a priced drafter pass: a round drafts only where its streams' drafts pay for the pass and their shares" {
+    const gpa = std.testing.allocator;
+    var costs = try extendCosts(gpa, &.{ .{ .width = 1, .ms = 34.0 }, .{ .width = 8, .ms = 77.0 }, .{ .width = 32, .ms = 161.0 } }, 32);
+    defer costs.deinit(gpa);
+    var likely: [8][]const f64 = undefined;
+    var some_land: [8][]const f64 = undefined;
+    for (&likely, &some_land) |*l, *s| {
+        l.* = &.{ 0.9, 0.85, 0.8, 0.75 };
+        s.* = &.{ 0.6, 0.4, 0.2 };
+    }
+    const ones: [8]u32 = @splat(1);
+    const head: HeadCost = .{ .pass_ms = 8.0, .first_ms = 4.6 };
+    // eight streams whose drafts land some of the time: priced free every stream drafts, priced the plain round wins
+    const free = try allocateDrafts(gpa, &ones, &some_land, &costs, 10.0, 32, .{});
+    defer gpa.free(free);
+    for (free) |c| try std.testing.expect(c >= 1);
+    const none = try allocateDrafts(gpa, &ones, &some_land, &costs, 10.0, 32, head);
+    defer gpa.free(none);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 0, 0, 0, 0, 0, 0, 0 }, none);
+    // likely drafts pay for the pass
+    const some = try allocateDrafts(gpa, &ones, &likely, &costs, 10.0, 32, head);
+    defer gpa.free(some);
+    for (some) |c| try std.testing.expect(c >= 1);
 }
 
 test "allocate takes the widest round when no cost is timed" {

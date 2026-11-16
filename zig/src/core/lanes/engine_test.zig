@@ -98,12 +98,17 @@ pub fn modelWith(mtp: bool) !Config {
     return Config.init(gpa, .{ .exact_width = 16, .gpu_tokens = true, .mtp = mtp, .speculate = true, .speculate_early = false, .drafts = 4, .window_costs = &costs, .mtp_step_ms = 0.5, .hidden_rows = true, .batch_rows = 32, .max_streams = 8, .draft_streams = true }, 16, 15);
 }
 
+/// `run`'s target masks a grammar stream's held chain after its verify (Backend.late_masks), and what it saw.
+var run_late = false;
+var ran_late: struct { windows: usize = 0, free_rows: usize = 0 } = .{};
+
 /// Every case's emitted tokens, the cases admitted together and stepped until done.
 fn run(cases: []const Case) ![][]u32 {
     var cfg = try model();
     defer cfg.deinit(gpa);
-    var target: fake.Fake = .{ .gpa = gpa };
+    var target: fake.Fake = .{ .gpa = gpa, .late_masks = run_late };
     defer target.deinit();
+    defer ran_late = .{ .windows = target.late_windows, .free_rows = target.late_free_rows };
     var clock: fake.FixedClock = .{};
     var engine = Engine.init(gpa, &cfg, target.backend(), clock.clock());
     defer engine.deinit();
@@ -443,6 +448,47 @@ test "structured output: where the grammar spells its own text, its drafts fill 
         // the head's guesses are wrong here; the grammar's own drafts land every round, a window's worth at a time
         try std.testing.expect(s.emitted().len > 4 * s.rounds);
     }
+}
+
+test "structured output, late masks: a grammar stream's held chain goes out unread and every case commits what the walked windows commit" {
+    const sampled: Sampling = .{ .seed = 9, .temperature = 1.0, .top_k = 0, .top_p = 0.9 };
+    const groups = [_][]const Case{
+        &.{.{ .prompt = &p1, .classes = .{} }},
+        &.{.{ .prompt = &p1, .sampling = sampled, .classes = .{} }},
+        &.{.{ .prompt = &p1, .max_new = 80, .classes = .{ .length = 60, .free = true } }},
+        &.{.{ .prompt = &p1, .sampling = sampled, .max_new = 80, .classes = .{ .length = 60, .free = true } }},
+        &.{.{ .prompt = &p2, .think_budget = 9, .classes = .{ .after = 91 } }},
+        &.{.{ .prompt = &p1, .eos = &.{}, .max_new = 200, .classes = .{ .length = 5 } }},
+        &.{.{ .prompt = &p1, .max_new = 80, .classes = .{ .length = 50, .spell = true } }},
+        // shared rounds: grammar streams beside plain greedy and sampled ones
+        &.{ .{ .prompt = &p1, .classes = .{ .length = 20 } }, .{ .prompt = &p2, .sampling = sampled, .max_new = 30 }, .{ .prompt = &p2, .sampling = sampled, .classes = .{ .length = 7 } } },
+        &.{ .{ .prompt = &p1, .max_new = 60, .classes = .{ .length = 40, .free = true } }, .{ .prompt = &p2, .max_new = 60 }, .{ .prompt = &p1, .max_new = 60 }, .{ .prompt = &p2, .sampling = sampled, .max_new = 60, .classes = .{ .length = 30, .free = true } } },
+    };
+    defer run_late = false;
+    var late_windows: usize = 0;
+    var free_rows: usize = 0;
+    for (groups) |cases| {
+        run_late = false;
+        const walked = try run(cases);
+        defer free(walked);
+        run_late = true;
+        const late = try run(cases);
+        defer free(late);
+        late_windows += ran_late.windows;
+        free_rows += ran_late.free_rows;
+        for (cases, walked, late) |c, w, l| {
+            try std.testing.expectEqualSlices(u32, w, l);
+            if (c.classes) |g| try expectInGrammar(l, g);
+            // and drafted == one-token rounds under the late masks
+            var plain_case = c;
+            plain_case.drafts = false;
+            const plain = try run(&.{plain_case});
+            defer free(plain);
+            try std.testing.expectEqualSlices(u32, plain[0], l);
+        }
+    }
+    // late windows ran, and some held a draft the grammar refused (rows drawn unconstrained, never kept)
+    try std.testing.expect(late_windows > 20 and free_rows > 0);
 }
 
 test "a family that keeps copies to shared rounds proposes none for a lone stream" {

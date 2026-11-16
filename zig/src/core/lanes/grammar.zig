@@ -333,6 +333,17 @@ pub const Constraint = struct {
         return error.GrammarDeadEnd;
     }
 
+    /// A late window's bits (Backend.late_masks): the chain of `tokens` (row 0 pending, then the held drafts the
+    /// verify made) walked as `window` walks host drafts before a forward, with no room for the grammar's own drafts.
+    /// `rows.len` rows from row 0 can be on an accepted path; a row past them follows a draft the grammar refuses (the
+    /// row before it draws under bits that refuse that draft, so no path reaches it) or the grammar's stop token (the
+    /// reply ends there), and is drawn unconstrained. Empty masks: no row is constrained.
+    pub fn late(c: *Constraint, a: Allocator, tokens: []const u32) !Window {
+        const parents = try a.alloc(i32, tokens.len);
+        for (parents, 0..) |*p, i| p.* = @as(i32, @intCast(i)) - 1;
+        return c.window(a, tokens, parents, false, 0); // no room: none of the grammar's own drafts (`extra`)
+    }
+
     /// Rows of `tokens` (row 0 pending) an accepted path can use, with bits; `forced` keeps rows, unmasked past a miss.
     pub fn window(c: *Constraint, a: Allocator, tokens: []const u32, parents: []const i32, forced: bool, room: usize) !Window {
         const n = tokens.len;

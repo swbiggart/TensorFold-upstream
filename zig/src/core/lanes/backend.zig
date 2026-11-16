@@ -18,6 +18,7 @@ pub const Window = struct {
     positions: []const u64, // the absolute position each row's draw is keyed at
     early: bool = false, // also draft each row's first head draft behind the verify (speculate_early)
     masks: []const u32 = &.{}, // structured output: each row's allowed-token bits (rows x words, lanes/grammar.zig); empty: none
+    late_masks: bool = false, // structured output: a grammar stream's held chain sent unread; the backend masks its rows (Backend.late_masks)
 
     pub fn rows(w: Window) usize {
         return 1 + @as(usize, w.held) + w.tokens.len;
@@ -82,6 +83,12 @@ pub const Backend = struct {
     penalties: bool = false,
     /// Prompt fill gives the same tokens at any chunk cut, so --decode-share may cap its chunk rows; wrappers copy it.
     chunk_invariant: bool = false,
+    /// Structured output with held drafts made inside the verify's own step: a grammar stream's window of a held chain
+    /// goes out without reading its drafts back first (Window.late_masks, no masks), and the backend draws its rows
+    /// under `Constraint.late` over the pending token and the drafts the step made, once they are on the host. A
+    /// grammar stream then drafts in the round's shared pass like any other instead of a pass of its own before its
+    /// window; the grammar's own drafts past the chain are not added. Wrappers leave it off.
+    late_masks: bool = false,
     ptr: *anyopaque,
     vtable: *const VTable,
 

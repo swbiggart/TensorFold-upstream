@@ -1,5 +1,7 @@
 //! One stream (Python LaneStream) and the round loop's state for it (Python's dicts keyed by stream id).
 const std = @import("std");
+/// Buckets of the per-request draft counts (Stream.depth_rounds): drafts 0 .. 7, the last also deeper.
+pub const depth_buckets = 8;
 const grammar = @import("grammar.zig");
 const shape = @import("shape.zig");
 const plan_lanes = @import("plan_lanes.zig");
@@ -234,6 +236,12 @@ pub const Stream = struct {
     grammar_time: @import("grammar_time.zig").Sum = .{},
     grammar_round: @import("grammar_time.zig").Round = .{},
     gpu_seconds: ?f64 = null, // a timed backend's passes this stream ran in (TF_Q27_PROFILE); null: untimed
+    depth_rounds: [depth_buckets]u32 = @splat(0), // drafted rounds by drafts verified (rows - 1; the last bucket: that or more)
+    depth_kept: [depth_buckets]u32 = @splat(0), // and the drafts they accepted
+    kept_rounds: [depth_buckets]u32 = @splat(0), // drafted rounds by drafts accepted (the last bucket: that or more)
+    stale_drafts: u32 = 0, // the backend's drafts made from another forward's taps than the stream's own last one
+    draft_gap_ns: u64 = 0, // the backend's host time from a draft's return to the stream's next verify (summed)
+    draft_gaps: u32 = 0,
     paused: bool = false,
     depth: ?State = null,
     mode: ?Mode = null,

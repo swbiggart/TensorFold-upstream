@@ -17,6 +17,14 @@ pub const Stats = struct {
     gpu_seconds: ?f64 = null,
     /// Seconds from engine submission to first admission; an engine that admits immediately leaves zero.
     queued_seconds: f64 = 0,
+    /// Rounds by drafts verified (drafts 0 .. 7, the last bucket that or more) and the drafts they accepted; rounds
+    /// by drafts accepted (lanes Stream.depth_rounds).
+    depth_rounds: [8]u32 = @splat(0),
+    depth_kept: [8]u32 = @splat(0),
+    kept_rounds: [8]u32 = @splat(0),
+    /// The backend's drafts made from stale taps, and its mean host gap from a draft's return to the next verify.
+    stale_drafts: u32 = 0,
+    draft_gap_ms: ?f64 = null,
     /// The drafter's own counters as a JSON object, or empty.
     telemetry_json: []const u8 = "",
 };

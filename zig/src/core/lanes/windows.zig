@@ -35,6 +35,7 @@ pub const Plan = struct {
     tried: bool = false, // the planner read the head's chain back to graft branches
     lanes: ?*const shape.Shape = null, // the held drafts' tree shape (each lane's depth and rank)
     masks: []const u32 = &.{}, // structured output: the rows' allowed-token bits (constrain)
+    late_masks: bool = false, // structured output: the backend masks the held chain's rows itself (Backend.late_masks)
     grammar_from: u32 = 0, // the first row the grammar drafted itself (0: none)
     recalled: bool = false, // the copy came from Recall's record
     graft_recalled: []const bool = &.{}, // each row from branch_from: a Recall candidate grafted it
@@ -230,7 +231,7 @@ pub fn probe(e: *Engine) depth.Probe {
 }
 
 pub fn who(s: *Stream) depth.Who {
-    return .{ .state = &s.depth, .draft_room = s.draftRoom(), .finished = s.finished, .forced = s.force.items.len > 0, .granted = s.granted, .grant_short = s.grant_short, .gain = s.grant_gain, .stream = s, .sampled = s.sampling != null };
+    return .{ .state = &s.depth, .draft_room = s.draftRoom(), .finished = s.finished, .forced = s.force.items.len > 0, .granted = s.granted, .grant_short = s.grant_short, .gain = s.grant_gain, .stream = s, .sampled = s.sampling != null, .context = s.cache_len };
 }
 
 /// Whether any of a round's streams draws keyed samples (its rows carry their host work).
@@ -514,7 +515,7 @@ pub fn build(e: *Engine, p: Plan, early: bool) !be.Window {
     const ds = try accept.depths(a, parents);
     const positions = try a.alloc(u64, rows);
     for (positions, ds) |*x, d| x.* = p.position + 1 + d;
-    return .{ .stream = p.stream, .pending = p.stream.pending.?, .held = p.held, .tokens = p.tokens, .parents = if (p.parents != null) parents else null, .positions = positions, .early = early, .masks = p.masks };
+    return .{ .stream = p.stream, .pending = p.stream.pending.?, .held = p.held, .tokens = p.tokens, .parents = if (p.parents != null) parents else null, .positions = positions, .early = early, .masks = p.masks, .late_masks = p.late_masks };
 }
 
 pub fn rowParents(e: *Engine, w: be.Window) ![]const i32 {

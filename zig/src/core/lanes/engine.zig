@@ -70,12 +70,16 @@ pub const Engine = struct {
                 .shared_costs = &cfg.shared_costs,
                 .mtp_step_ms = cfg.mtp_step_ms,
                 .draft_step_ms = cfg.draft_step_ms,
+                .context_costs = cfg.context_costs,
+                .depth_from = cfg.depth_from,
+                .ab_modes = cfg.depth_ab,
                 .plain_guard = cfg.plain_guard,
                 .node_probabilities = cfg.node_probabilities,
                 .granted_depth = cfg.granted_depth,
                 .confidence_floor = cfg.draft_confidence,
                 .batch_rows = cfg.batch_rows,
                 .batched_heads = cfg.draft_streams,
+                .draft_pass = cfg.draft_pass,
             },
         };
     }
@@ -227,7 +231,7 @@ pub const Engine = struct {
                 if (early) if (e.backend.vtable.unspeculate) |undo| try undo(e.backend.ptr, s);
                 try e.draftLate(s, plan.position, o.follow, o.path, null);
             }
-            if (e.cfg.timed and (plan.kind == .head or (plan.kind == .none and e.cfg.plain_guard))) {
+            if (e.cfg.timed and (plan.kind == .head or (plan.kind == .none and (e.cfg.plain_guard or e.cfg.context_costs.len > 0)))) {
                 const ms = e.clock.elapsedMs(.cost);
                 const first = s.rounds == 1; // a stream's first round carries the prefill-to-decode switch
                 try trail.event(e, &.{ f("ev", str("cost")), f("stream", str(s.id)), f("drafts", int(rows - 1)), f("init", .{ .bool = first }), f("ms", ev.bits(ms)) });
@@ -248,7 +252,7 @@ pub const Engine = struct {
         if (e.cfg.timed and plan.kind == .head) {
             const ms = e.clock.elapsedMs(.overhead);
             try trail.event(e, &.{ f("ev", str("overhead")), f("streams", int(1)), f("rows", int(rows)), f("ms", ev.bits(ms)) });
-            try e.rule.observeOverhead(1, rows, ms, s.sampling != null, 0.0);
+            try e.rule.observeOverheadAt(1, rows, ms, s.sampling != null, 0.0, try e.rule.streamDepthMs(win.who(s), @intCast(rows - 1)));
         }
         if (e.backend.round_observer != null) e.backend.observed(&.{o.path});
         return .{ .rows = @intCast(rows), .keep = @intCast(o.path.len), .got = o.got };
@@ -319,7 +323,12 @@ pub const Engine = struct {
             for (budgets) |d| steps = if (e.cfg.draft_streams and depth.pricedBatched()) @max(steps, d - 1) else steps + @max(0, d - 1);
             const ms = e.clock.elapsedMs(.overhead) - e.cfg.draft_step_ms * @as(f64, @floatFromInt(steps));
             try trail.event(e, &.{ f("ev", str("overhead")), f("streams", int(plans.len)), f("rows", int(total)), f("ms", ev.bits(ms)) });
-            try e.rule.observeOverhead(@intCast(plans.len), total, ms, sampled, e.rule.headMs(budgets));
+            // what the streams' depth took of it (context_costs) is no overhead either
+            var depth_ms: f64 = 0;
+            if (e.cfg.context_costs.len > 0) for (plans, windows) |p, w| {
+                depth_ms += try e.rule.streamDepthMs(win.who(p.stream), @intCast(w.rows() - 1));
+            };
+            try e.rule.observeOverheadAt(@intCast(plans.len), total, ms, sampled, e.rule.headMs(budgets), depth_ms);
         }
         if (e.backend.round_observer != null) e.backend.observed(paths);
     }
@@ -395,6 +404,14 @@ pub const Engine = struct {
                 }
             }
             if (s.recall) |r| if (p.kind != .copy) r.noteHead(path.len); // its own rounds: the bar a copy must beat
+            {
+                // the reply's draft counts by depth (the done line): rows - 1 verified, path.len - 1 accepted
+                const last = s.depth_rounds.len - 1;
+                const d = @min(rows - 1, last);
+                s.depth_rounds[d] += 1;
+                s.depth_kept[d] += @intCast(path.len - 1);
+                s.kept_rounds[@min(path.len - 1, last)] += 1;
+            }
         }
         if (e.trim) |t| if (p.kind != .forced) {
             const chain = parents.len == 0 or accept.isChain(parents);
