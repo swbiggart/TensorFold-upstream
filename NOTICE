@@ -6,3 +6,24 @@ TensorFold is licensed under the Apache License, Version 2.0 (LICENSE) from 0.6.
 Releases up to 0.5.0 were MIT-licensed, and code written before 0.6.0 keeps its
 MIT notice in LICENSES/MIT.txt. Third-party code and its licenses are listed in
 THIRD_PARTY_NOTICES.md.
+
+Inkling-2-Small TP4
+Copyright 2026 Scott Biggart
+
+This fork modifies TensorFold at commit 223da7659. It adds the Inkling-2 family
+(zig/src/families/inkling2/, zig/kernels/cuda/inkling2_*.cu, tools/zig/inkling2_*.py)
+and changes some upstream files. The recipe that serves it (recipe/inkling2-tp4/) and the
+release scripts are in the inkling2-sparks repository
+(https://github.com/swbiggart/inkling2-sparks). These changes are licensed under the Apache License, Version 2.0 (LICENSE).
+Outside code they include keeps its own license and notice, and the outside sources
+they follow are credited, in the "Inkling-2-Small" section of THIRD_PARTY_NOTICES.md.
+
+The Inkling-2-Small release assets bundle NVIDIA NCCL 2.30.7 (Copyright (c) 2015-2026 NVIDIA CORPORATION &
+AFFILIATES; Apache License 2.0 and BSD 3-Clause, LICENSES/NCCL-LICENSE.txt) and NVIDIA cuBLAS / cuBLASLt 13.1.1.3
+(proprietary, redistributed unmodified under the NVIDIA CUDA Toolkit EULA, LICENSES/NVIDIA-CUDA-EULA.txt) in lib/,
+unmodified, with their license texts. They are not covered by the Apache License of this work.
+
+The assets also carry lib/libtfgrammar.so (structured output), built from this work's zig/src/grammar/tf_grammar.cc and
+the C++ sources of xgrammar v0.2.8 (Copyright (c) 2024 by XGrammar Contributors, Apache License 2.0), with the headers of
+dlpack (Apache License 2.0) and picojson (BSD 2-Clause License, Copyright 2009-2010 Cybozu Labs, Inc. and 2011-2014
+Kazuho Oku). Their licenses are in LICENSES/ and lib/; xgrammar's notice is LICENSES/xgrammar-NOTICE.txt.
