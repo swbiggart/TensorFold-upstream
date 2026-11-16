@@ -14,8 +14,41 @@ pub fn runtime(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
 
 /// verbs.zig as its own module; a compilation that also builds fabric.zig passes this one in (a file has one module).
 pub fn verbsModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
-    return b.createModule(.{ .root_source_file = b.path("zig/src/fabric/verbs.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    for (memo.vlist[0..memo.n_verbs]) |m| if (m.key.eql(target, optimize, null, null)) return m.mod;
+    const m = b.createModule(.{ .root_source_file = b.path("zig/src/fabric/verbs.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    memo.put(&memo.vlist, &memo.n_verbs, .{ .key = .of(target, optimize, null, null), .mod = m });
+    return m;
 }
+
+/// One verbs and one tp module per target, optimize mode and runtime: families in one binary (GLM, inkling2) share
+/// them, since a file may belong to only one module of a compilation.
+const memo = struct {
+    const Key = struct {
+        arch: std.Target.Cpu.Arch,
+        os: std.Target.Os.Tag,
+        abi: std.Target.Abi,
+        cuda: ?*std.Build.Module,
+        verbs: ?*std.Build.Module,
+        fn of(t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode, cuda: ?*std.Build.Module, vb: ?*std.Build.Module) Key {
+            _ = o; // the first caller's mode: a family in Debug and one in ReleaseSafe still share one module
+            return .{ .arch = t.result.cpu.arch, .os = t.result.os.tag, .abi = t.result.abi, .cuda = cuda, .verbs = vb };
+        }
+        fn eql(k: Key, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode, cuda: ?*std.Build.Module, vb: ?*std.Build.Module) bool {
+            return std.meta.eql(k, of(t, o, cuda, vb));
+        }
+    };
+    const Entry = struct { key: Key, mod: *std.Build.Module };
+    var vlist: [1024]Entry = undefined;
+    var n_verbs: usize = 0;
+    var tlist: [1024]Entry = undefined;
+    var n_tp: usize = 0;
+    fn put(list: *[1024]Entry, n: *usize, e: Entry) void {
+        if (n.* < list.len) { // full: later callers get their own module, as before the memo
+            list[n.*] = e;
+            n.* += 1;
+        }
+    }
+};
 
 /// The `tp` module over `cuda` (an engine passes its own runtime module); verbs (zig/src/fabric/verbs.zig) for RoCE.
 pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module) *std.Build.Module {
@@ -24,9 +57,11 @@ pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
 
 /// Same as `module`, using a verbs module the caller already owns.
 pub fn moduleWith(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, verbs: *std.Build.Module) *std.Build.Module {
+    for (memo.tlist[0..memo.n_tp]) |e| if (e.key.eql(target, optimize, cuda, verbs)) return e.mod;
     const m = b.createModule(.{ .root_source_file = b.path("zig/src/fabric/tp/tp.zig"), .target = target, .optimize = optimize, .link_libc = true });
     m.addImport("cuda", cuda);
     m.addImport("verbs", verbs);
+    memo.put(&memo.tlist, &memo.n_tp, .{ .key = .of(target, optimize, cuda, verbs), .mod = m });
     return m;
 }
 

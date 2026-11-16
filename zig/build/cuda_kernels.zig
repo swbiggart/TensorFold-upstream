@@ -147,6 +147,15 @@ pub const kernels = [_]Kernel{
     .{ .name = "glm_index", .flags = &.{"-O3"} }, // a prompt chunk's DSA scores and top-512 pools
     .{ .name = "minimax_m3", .flags = glue }, // ours: MiniMax-M3.1-Flash's glue (norms, RoPE prep, routing, DSpark, tower RoPE)
     .{ .name = "minimax_m3_attn", .flags = glue }, // ours: MiniMax-M3.1-Flash's indexer and block-sparse attention
+    // Inkling-2-Small's op groups (families/inkling2/cuda_<group>.zig): one image a group, each lane its own file
+    .{ .name = "inkling2_attn", .flags = glue },
+    .{ .name = "inkling2_conv", .flags = glue },
+    .{ .name = "inkling2_res", .flags = glue },
+    .{ .name = "inkling2_moe", .flags = glue }, // torch's op-by-op roundings: no contraction, IEEE division
+    .{ .name = "inkling2_head", .flags = glue },
+    .{ .name = "inkling2_dspark", .flags = glue }, // the DSpark drafter (mtp.safetensors)
+    .{ .name = "inkling2_fuse", .flags = glue }, // fused stateless neighbours: the same bits as the ops they replace
+    .{ .name = "inkling2_ck", .flags = glue, .arch_specific = true }, // checkpoint-mode experts: block-scaled FP4 / FP8 mma (sm_12xa)
     .{ .name = "glm_quant", .flags = torch_ops }, // ours: GLM's draft-only weight quantizers, torch at load in the Python family
     .{ .name = "exl3_linear", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } }, // exl3/linear.cu's device code, tensorfold_exl3_linear_v5
     .{ .name = "exl3_experts", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } }, // exl3/experts.cu's device code, tensorfold_exl3_experts
