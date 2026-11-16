@@ -82,27 +82,12 @@ fn priority(marks: []const u32, endpoint: u32) ?u32 {
     return null;
 }
 
-/// A guarded reservation makes room for the endpoint alone; other copies cannot displace a newest state.
-pub fn reserve(s: *pc.Store, prompt: []const u32, born: u32, from: ?*pc.Entry, marks: []const u32, spans: []const modes.Span, endpoint: u32) void {
+/// A guarded reservation makes room for the endpoint alone (with rules.shared_first, also for `second`, the longest
+/// shared cut, when both can fit); other copies cannot displace a newest state.
+pub fn reserve(s: *pc.Store, prompt: []const u32, born: u32, from: ?*pc.Entry, marks: []const u32, spans: []const modes.Span, endpoint: u32, second: u32) void {
     if (s.reservation_guard != null) {
-        const at = priority(marks, endpoint) orelse return;
-        if (exists(s, prompt, at, spans)) return;
-        const need = s.family.vtable.bytes(s.family.ptr, at);
-        if (need > s.budget or s.most == 0) return;
-        const credit = reclaimable(s, from, prompt, born);
-        const promised = s.reservation_guard.?.promised;
-        // Preserve deficits: freeing a state must pay the other jobs' promises before this endpoint can fit.
-        var bytes: i128 = @as(i128, s.budget) - s.held + credit.bytes - promised.bytes;
-        var slots: i128 = @as(i128, s.most) - s.entries.items.len + credit.slots - promised.slots;
-        const can = evictable(s, from, prompt);
-        if (bytes + can.bytes < need or slots + can.slots < 1) return;
-        while (bytes < need or slots < 1) {
-            const i = others.victim(s, from, prompt, born, need, 1) orelse return;
-            bytes += s.entries.items[i].bytes;
-            slots += 1;
-            s.remove(i);
-            s.counts.evicted += 1;
-        }
+        if (second != 0 and second != endpoint and reserveFor(s, prompt, born, from, marks, spans, &.{ endpoint, second })) return;
+        _ = reserveFor(s, prompt, born, from, marks, spans, &.{endpoint});
         return;
     }
     var need: u64 = 0;
@@ -118,24 +103,56 @@ pub fn reserve(s: *pc.Store, prompt: []const u32, born: u32, from: ?*pc.Entry, m
     }
 }
 
-/// Select the endpoint first; only interior, rewind and extra shared cuts compete for room after it.
-pub fn fitting(s: *pc.Store, a: std.mem.Allocator, prompt: []const u32, marks: []const u32, spans: []const modes.Span, from: ?*pc.Entry, born: u32, endpoint: u32) ![]const u32 {
+/// Room made for the priority marks `ps` that are planned and not kept (evicting as the victim order allows), or
+/// false with nothing evicted when they cannot all fit.
+fn reserveFor(s: *pc.Store, prompt: []const u32, born: u32, from: ?*pc.Entry, marks: []const u32, spans: []const modes.Span, ps: []const u32) bool {
+    var need: u64 = 0;
+    var n: usize = 0;
+    for (ps) |p| {
+        const at = priority(marks, p) orelse continue;
+        if (exists(s, prompt, at, spans)) continue;
+        need += s.family.vtable.bytes(s.family.ptr, at);
+        n += 1;
+    }
+    if (n == 0) return true;
+    if (need > s.budget or s.most < n) return false;
+    const credit = reclaimable(s, from, prompt, born);
+    const promised = s.reservation_guard.?.promised;
+    // Preserve deficits: freeing a state must pay the other jobs' promises before this endpoint can fit.
+    var bytes: i128 = @as(i128, s.budget) - s.held + credit.bytes - promised.bytes;
+    var slots: i128 = @as(i128, s.most) - s.entries.items.len + credit.slots - promised.slots;
+    const can = evictable(s, from, prompt);
+    if (bytes + can.bytes < need or slots + can.slots < n) return false;
+    while (bytes < need or slots < n) {
+        const i = others.victim(s, from, prompt, born, need, n) orelse return true;
+        bytes += s.entries.items[i].bytes;
+        slots += 1;
+        s.remove(i);
+        s.counts.evicted += 1;
+    }
+    return true;
+}
+
+/// Select the endpoint first (with rules.shared_first, then `second`, the longest shared cut); only interior, rewind
+/// and extra shared cuts compete for room after them.
+pub fn fitting(s: *pc.Store, a: std.mem.Allocator, prompt: []const u32, marks: []const u32, spans: []const modes.Span, from: ?*pc.Entry, born: u32, endpoint: u32, second: u32) ![]const u32 {
     if (s.reservation_guard == null) return marks;
     defer a.free(marks);
     var out: std.ArrayList(u32) = .empty;
     errdefer out.deinit(a);
     var room = future(s, from, prompt, born);
     const end = priority(marks, endpoint);
-    if (end) |at| {
+    const end2 = if (second != endpoint) priority(marks, second) else null;
+    for ([2]?u32{ end, end2 }) |first| if (first) |at| {
         const bytes = if (exists(s, prompt, at, spans)) 0 else s.family.vtable.bytes(s.family.ptr, at);
         if (bytes == 0 or (bytes <= room.bytes and room.slots > 0)) {
             try out.append(a, at);
             room.bytes -= bytes;
             if (bytes > 0) room.slots -= 1;
         }
-    }
+    };
     for (marks) |at| {
-        if (end == at) continue;
+        if (end == at or end2 == at) continue;
         const bytes = if (exists(s, prompt, at, spans)) 0 else s.family.vtable.bytes(s.family.ptr, at);
         if (bytes == 0 or (bytes <= room.bytes and room.slots > 0)) {
             try out.append(a, at);
