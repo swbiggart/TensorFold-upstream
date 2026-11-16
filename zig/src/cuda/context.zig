@@ -13,6 +13,12 @@ pub const Context = struct {
     /// How the host waits for the device (CU_CTX_SCHED_*); host scheduling only, no launch or value changes.
     pub const Schedule = enum(c_uint) { auto = 0, spin = 1, yield = 2, blocking = 4 };
 
+    /// TF_CUDA_SCHED: auto, spin, yield or blocking (null: unset or another word, the driver's choice).
+    pub fn scheduleFromEnv() ?Schedule {
+        const v = std.mem.span(std.c.getenv("TF_CUDA_SCHED") orelse return null);
+        return std.meta.stringToEnum(Schedule, v);
+    }
+
     /// The device's primary context's schedule, before any `init` of it (the driver ignores it on an active context).
     pub fn setSchedule(d: *const Driver, ordinal: c_int, s: Schedule) Error!void {
         var dev: abi.Device = 0;
