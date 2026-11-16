@@ -87,6 +87,24 @@ CONVERSATIONS = [
     [user("think_off"), {"role": "system", "content": "late <|think_off|> system"}, user("again <|think_on|>")],
     [user("Long tool"), assistant("", tool_calls=[{"id": "call_1", "type": "function", "function": {"name": "weather", "arguments": {"city": "x" * 40, "n": 12}}}]),
      {"role": "tool", "tool_call_id": "call_1", "content": "y" * 50 + " error: failed to — done"}],
+    # typed-part templates (Inkling 2): image part spellings, refused media, names, and arguments that are not objects
+    [user([{"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}, {"type": "text", "text": "Describe."}])],
+    [user([{"type": "input_image", "image_url": "https://example.com/a.png"}, {"type": "input_text", "text": "And this?"}, "bare string part"])],
+    [user([{"type": "input_audio", "input_audio": {"data": "AAAA", "format": "wav"}}])],
+    [user([{"type": "video_url", "video_url": {"url": "https://example.com/v.mp4"}}])],
+    [user("Look"), assistant([{"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}])],
+    [user("Screenshot please"), assistant("", tool_calls=[CALL]), {"role": "tool", "tool_call_id": "call_1", "content": [{"type": "text", "text": "Here:"}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]}],
+    [user("Named"), assistant("", name="weather", tool_calls=[CALL]), {"role": "tool", "name": "weather", "content": "Sunny"}],
+    [user("Mismatch"), assistant("", name="other", tool_calls=[CALL])],
+    [user("List args"), assistant("", tool_calls=[{"id": "c", "type": "function", "function": {"name": "weather", "arguments": [1, 2]}}])],
+    [user("Bad name"), assistant("", tool_calls=[{"id": "c", "type": "function", "function": {"name": 7, "arguments": {}}}])],
+    [{"role": "narrator", "content": "unknown role"}, user("Hi")],
+    [{"role": "system", "content": "First"}, {"role": "system", "content": "Second"}, user("Q"), assistant("A"), {"role": "system", "content": "Late"}, user("R")],
+    [user("Think only"), assistant("", reasoning_content="Only thoughts, no text.")],
+    [user("Parts"), assistant([{"type": "text", "text": "One"}, {"type": "text", "text": "Two"}], reasoning_content="r")],
+    [user("Sorted args"), assistant("", tool_calls=[{"id": "c", "type": "function", "function": {"name": "weather", "arguments": {"b": 1, "B": 2, "a": {"z": 1, "y": [1.5, "é"]}, "_": None}}}])],
+    [assistant("Assistant first")],
+    [{"role": "tool", "tool_call_id": "x", "content": "orphan result"}],
 ]
 CONTEXTS = [
     {},
@@ -99,6 +117,9 @@ CONTEXTS = [
     {"enable_thinking": False, "preserve_thinking": False, "clear_thinking": False, "truncate_history_thinking": False, "add_vision_id": True},
     {"enable_thinking": True, "preserve_thinking": True, "max_tool_arg_chars": 10, "max_tool_response_chars": 20, "auto_disable_thinking_with_tools": True},
     {"enable_thinking": None, "thinking_mode": None},
+    # every OpenAI effort name, padded and numeric efforts, and values a numeric thinking-effort line refuses
+    *({"reasoning_effort": effort} for effort in ("none", "minimal", "high", "max", " high ", None)),
+    *({"reasoning_effort": effort} for effort in (0, 0.0, 0.5, 0.99, 0.123456789, 1, -0.1, "0.5", True)),
 ]
 TOOL_CONTEXTS = (0, 1, 2, 7, 8)
 
@@ -335,9 +356,9 @@ def templates_in(path: Path):
             yield f"{name} (tokenizer_config:{key})", entry, specials
 
 
-def collect(extra):
+def collect(extra, hub=True):
     found = {}
-    for path in [*hub_dirs(), *map(Path, extra)]:
+    for path in [*(hub_dirs() if hub else []), *map(Path, extra)]:
         for label, source, specials in templates_in(path):
             key = hashlib.sha256(source.encode()).hexdigest()[:12]
             entry = found.setdefault(key, {"source": source, "labels": [], "specials": specials})
@@ -519,6 +540,7 @@ def main():
     p.add_argument("--unicode-data", type=Path, help="write zig/src/core/template/unicode_data.zig and exit")
     p.add_argument("--fuzz", type=int, default=0, help="random conversations per template")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--no-hub", action="store_true", help="only the --extra templates, not the Hugging Face cache's")
     args = p.parse_args()
     if args.unicode_data:
         args.unicode_data.write_text(unicode_tables())
@@ -527,11 +549,12 @@ def main():
     if args.out is None:
         p.error("--out is required")
     args.out.mkdir(parents=True, exist_ok=True)
-    found = collect(args.extra)
+    found = collect(args.extra, hub=not args.no_hub)
     corpus = build(found, args.fuzz, args.seed)
     corpus_path, results_path = args.out / "corpus.json", args.out / "results.json"
     corpus_path.write_text(json.dumps(corpus, ensure_ascii=False))
-    subprocess.run([args.zig, "run", "-lc", "-OReleaseSafe", str(ROOT / "zig/src/core/template/parity.zig"), "--", str(corpus_path), str(results_path)], check=True)
+    modules = ["--dep", "sys", f"-Mroot={ROOT / 'zig/src/core/template/parity.zig'}", f"-Msys={ROOT / 'zig/src/platform/sys.zig'}"]
+    subprocess.run([args.zig, "run", "-lc", "-OReleaseSafe", *modules, "--", str(corpus_path), str(results_path)], check=True)
     labels = {key: entry["labels"] for key, entry in found.items()}
     report, mismatches = compare(corpus, json.loads(results_path.read_text(encoding="utf-8")), labels)
     (args.out / "report.json").write_text(json.dumps({"python": sys.version.split()[0], "templates": report, "mismatches": mismatches}, ensure_ascii=False, indent=1))
