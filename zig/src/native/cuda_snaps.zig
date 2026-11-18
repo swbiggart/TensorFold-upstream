@@ -8,6 +8,7 @@ pub fn cacheRules(comptime F: type) api.prompt_cache.Rules {
     if (@hasDecl(F, "snap_lookahead")) rules.lookahead = F.snap_lookahead;
     if (@hasDecl(F, "warm_quiet")) rules.warm = .waits;
     if (@hasDecl(F, "snap_fork")) rules.fork = F.snap_fork; // opt-in, a family at a time after its device check
+    if (@hasDecl(F, "snap_shared_first")) rules.shared_first = F.snap_shared_first;
     if (@hasDecl(F, "snap_tail")) rules.tail = if (@import("core").profile.lookup(F.snap_tail)) |v| std.mem.eql(u8, v, "1") else false;
     if (@hasDecl(F, "snap_grid")) {
         rules.planned = true;

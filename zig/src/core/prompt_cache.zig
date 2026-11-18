@@ -266,7 +266,7 @@ pub const Store = struct {
                 s.resumedWithReason(e, prompt, null);
                 if (fresh_marks) |m| if (m.ptr != l.marks.ptr) a.free(m);
                 // Restored: this state may go too; a peer restores before it drops.
-                s.reserve(prompt, @intCast(prompt.len), null, l.marks, spans, @import("prompt_cache_reserve.zig").endpointFor(s, prompt, at, history_len, starts, spans));
+                s.reserve(prompt, @intCast(prompt.len), null, l.marks, spans, @import("prompt_cache_reserve.zig").endpointFor(s, prompt, at, history_len, starts, spans), 0);
                 return .{ .from = at, .marks = l.marks };
             } else |err| {
                 // a refused state is dropped, then the next shorter RAM state is tried before the pass from the start
@@ -277,7 +277,7 @@ pub const Store = struct {
         }
         const marks_ = fresh_marks orelse l.marks;
         if (fresh_marks != null and l.marks.ptr != marks_.ptr) a.free(l.marks);
-        s.reserve(prompt, @intCast(prompt.len), null, marks_, spans, @import("prompt_cache_reserve.zig").endpointFor(s, prompt, 0, history_len, starts, spans));
+        s.reserve(prompt, @intCast(prompt.len), null, marks_, spans, @import("prompt_cache_reserve.zig").endpointFor(s, prompt, 0, history_len, starts, spans), 0);
         return .{ .marks = marks_ };
     }
 
@@ -338,8 +338,13 @@ pub const Store = struct {
         if (history_len == 0 and primary == 0) for (marks_) |at| {
             if (at != s.active_rewind_at) primary = @max(primary, at);
         };
-        s.reserve(prompt, born, e, marks_, spans, primary);
-        const fitted = try @import("prompt_cache_reserve.zig").fitting(s, a, prompt, marks_, spans, e, born, primary);
+        var second: u32 = 0; // rules.shared_first: the longest shared cut planned, with the endpoint
+        if (s.rules.shared_first) for (shared) |w| {
+            const at = if (s.rules.planned) s.startAt(starts, w) else w;
+            if (at != primary and std.mem.indexOfScalar(u32, marks_, at) != null) second = @max(second, at);
+        };
+        s.reserve(prompt, born, e, marks_, spans, primary, second);
+        const fitted = try @import("prompt_cache_reserve.zig").fitting(s, a, prompt, marks_, spans, e, born, primary, second);
         if (e) |entry| entry.borrowers += 1;
         return .{ .entry = e, .marks = fitted };
     }
