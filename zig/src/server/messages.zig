@@ -36,6 +36,8 @@ pub const Media = struct {
     pdfs: bool = false,
     image_type: []const u8 = "image_url", // the part type the template reads (Vision.part_type)
     max_images: u32 = 50,
+    /// A family's own refusal of media parts while its media path is not served (Inkling 2's vision tower).
+    text_only: ?[]const u8 = null,
 
     pub fn of(v: ?api.Vision) Media {
         return ofVision(v, false);
@@ -98,7 +100,7 @@ pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_u
         if (media.native_deepseek) try @import("deepseek_request.zig").message(cx, message);
         const role = message.get("role");
         if (!isRole(role) and !(media.native_deepseek and role != null and role.? == .string and std.mem.eql(u8, role.?.string, "latest_reminder"))) return cx.refuse("message role must be system, developer, user, assistant or tool");
-        if (fields.hasMedia(message)) return cx.refuse("this server accepts text only; image, audio and video inputs are unsupported");
+        if (fields.hasMedia(message)) return cx.refuse(media.text_only orelse "this server accepts text only; image, audio and video inputs are unsupported");
         const content = message.get("content");
         var item: *json.Object = message.object;
         if (content != null and content.? == .array) {
@@ -135,7 +137,7 @@ pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_u
                     has_image = true;
                     continue;
                 }
-                if (!std.mem.eql(u8, kind, "text") or fields.hasMedia(part)) return cx.refuse(if (media.videos) "content parts must be text, image_url or video_url; audio is unsupported" else if (images) "content parts must be text or image_url; audio and video inputs are unsupported" else "this server accepts text parts only; image, audio and video inputs are unsupported");
+                if (!std.mem.eql(u8, kind, "text") or fields.hasMedia(part)) return cx.refuse(if (media.videos) "content parts must be text, image_url or video_url; audio is unsupported" else if (images) "content parts must be text or image_url; audio and video inputs are unsupported" else media.text_only orelse "this server accepts text parts only; image, audio and video inputs are unsupported");
                 const t = part.get("text") orelse return cx.refuse("a text content part must contain a text string");
                 if (t != .string) return cx.refuse("a text content part must contain a text string");
                 if (media.native_deepseek and part_index > 0) try text.appendSlice(cx.a, "\n\n");

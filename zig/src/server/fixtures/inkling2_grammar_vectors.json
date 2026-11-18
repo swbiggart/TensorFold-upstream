@@ -1,0 +1,360 @@
+[
+ {
+  "name": "so_json_object",
+  "request": {
+   "model": "model",
+   "temperature": 0,
+   "reasoning_effort": "none",
+   "response_format": {
+    "type": "json_object"
+   },
+   "messages": [
+    {
+     "role": "user",
+     "content": "Describe the planet Mars as a JSON object: its name, its position from the sun and two of its moons."
+    }
+   ]
+  },
+  "grammar": "{\"type\":\"structural_tag\",\"format\":{\"type\":\"sequence\",\"elements\":[{\"type\":\"optional\",\"content\":{\"type\":\"sequence\",\"elements\":[{\"type\":\"token\",\"token\":200001},{\"type\":\"token\",\"token\":200008},{\"type\":\"any_tokens\",\"exclude_tokens\":[199998,199999,200000,200001,200002,200003,200004,200005,200006,200007,200008,200009,200010,200011,200012,200013,200014,200015,200016,200017,200018,200019,200020,200021,200022,200023,200024,200025,200026,200027,200028,200029,200030,200031,200032,200033,200034,200035,200036,200037,200038,200039,200040,200041,200042,200043,200044,200045,200046,200047,200048,200049,200050,200051,200052,200053,200054,200055,200056,200057]},{\"type\":\"token\",\"token\":200010}]}},{\"type\":\"token\",\"token\":200001},{\"type\":\"token\",\"token\":200004},{\"type\":\"json_schema\",\"json_schema\":{\"type\":\"object\"},\"max_whitespace_cnt\":32,\"excludes\":[\"<|message_\",\"<|content_\",\"<|end\",\"<|begin_of_text|>\",\"<|unused\"]},{\"type\":\"token\",\"token\":200010}]}}"
+ },
+ {
+  "name": "so_json_schema",
+  "request": {
+   "model": "model",
+   "temperature": 0,
+   "reasoning_effort": "none",
+   "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+     "name": "film",
+     "schema": {
+      "type": "object",
+      "properties": {
+       "title": {
+        "type": "string"
+       },
+       "year": {
+        "type": "integer"
+       },
+       "genre": {
+        "type": "string",
+        "enum": [
+         "drama",
+         "comedy",
+         "science fiction",
+         "thriller"
+        ]
+       },
+       "director": {
+        "type": "object",
+        "properties": {
+         "name": {
+          "type": "string"
+         },
+         "born": {
+          "type": "integer"
+         }
+        },
+        "required": [
+         "name",
+         "born"
+        ],
+        "additionalProperties": false
+       },
+       "cast": {
+        "type": "array",
+        "items": {
+         "type": "string"
+        },
+        "minItems": 2,
+        "maxItems": 4
+       }
+      },
+      "required": [
+       "title",
+       "year",
+       "genre",
+       "director",
+       "cast"
+      ],
+      "additionalProperties": false
+     },
+     "strict": true
+    }
+   },
+   "messages": [
+    {
+     "role": "user",
+     "content": "Describe the film Blade Runner (1982)."
+    }
+   ]
+  },
+  "grammar": "{\"type\":\"structural_tag\",\"format\":{\"type\":\"sequence\",\"elements\":[{\"type\":\"optional\",\"content\":{\"type\":\"sequence\",\"elements\":[{\"type\":\"token\",\"token\":200001},{\"type\":\"token\",\"token\":200008},{\"type\":\"any_tokens\",\"exclude_tokens\":[199998,199999,200000,200001,200002,200003,200004,200005,200006,200007,200008,200009,200010,200011,200012,200013,200014,200015,200016,200017,200018,200019,200020,200021,200022,200023,200024,200025,200026,200027,200028,200029,200030,200031,200032,200033,200034,200035,200036,200037,200038,200039,200040,200041,200042,200043,200044,200045,200046,200047,200048,200049,200050,200051,200052,200053,200054,200055,200056,200057]},{\"type\":\"token\",\"token\":200010}]}},{\"type\":\"token\",\"token\":200001},{\"type\":\"token\",\"token\":200004},{\"type\":\"json_schema\",\"json_schema\":{\"type\":\"object\",\"properties\":{\"title\":{\"type\":\"string\"},\"year\":{\"type\":\"integer\"},\"genre\":{\"type\":\"string\",\"enum\":[\"drama\",\"comedy\",\"science fiction\",\"thriller\"]},\"director\":{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"},\"born\":{\"type\":\"integer\"}},\"required\":[\"name\",\"born\"],\"additionalProperties\":false},\"cast\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"minItems\":2,\"maxItems\":4}},\"required\":[\"title\",\"year\",\"genre\",\"director\",\"cast\"],\"additionalProperties\":false},\"max_whitespace_cnt\":32,\"excludes\":[\"<|message_\",\"<|content_\",\"<|end\",\"<|begin_of_text|>\",\"<|unused\"]},{\"type\":\"token\",\"token\":200010}]}}"
+ },
+ {
+  "name": "so_tool_required",
+  "request": {
+   "model": "model",
+   "temperature": 0,
+   "reasoning_effort": "low",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "get_time",
+      "description": "Current local time in a time zone.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "zone": {
+         "type": "string",
+         "description": "IANA zone name"
+        }
+       },
+       "required": [
+        "zone"
+       ]
+      }
+     }
+    }
+   ],
+   "tool_choice": "required",
+   "messages": [
+    {
+     "role": "user",
+     "content": "I'm calling a colleague in Tokyo. What time is it there now?"
+    }
+   ]
+  },
+  "grammar": "{\"type\":\"structural_tag\",\"format\":{\"type\":\"sequence\",\"elements\":[{\"type\":\"optional\",\"content\":{\"type\":\"sequence\",\"elements\":[{\"type\":\"token\",\"token\":200001},{\"type\":\"token\",\"token\":200008},{\"type\":\"any_tokens\",\"exclude_tokens\":[199998,199999,200000,200001,200002,200003,200004,200005,200006,200007,200008,200009,200010,200011,200012,200013,200014,200015,200016,200017,200018,200019,200020,200021,200022,200023,200024,200025,200026,200027,200028,200029,200030,200031,200032,200033,200034,200035,200036,200037,200038,200039,200040,200041,200042,200043,200044,200045,200046,200047,200048,200049,200050,200051,200052,200053,200054,200055,200056,200057]},{\"type\":\"token\",\"token\":200010}]}},{\"type\":\"plus\",\"content\":{\"type\":\"or\",\"elements\":[{\"type\":\"sequence\",\"elements\":[{\"type\":\"token\",\"token\":200001},{\"type\":\"const_string\",\"value\":\"get_weather\"},{\"type\":\"token\",\"token\":200049},{\"type\":\"json_schema\",\"json_schema\":{\"type\":\"object\",\"properties\":{\"name\":{\"const\":\"get_weather\"},\"args\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"},\"unit\":{\"type\":\"string\",\"enum\":[\"celsius\",\"fahrenheit\"]}},\"required\":[\"city\"]}},\"required\":[\"name\",\"args\"],\"additionalProperties\":false},\"max_whitespace_cnt\":32,\"excludes\":[\"<|message_\",\"<|content_\",\"<|end\",\"<|begin_of_text|>\",\"<|unused\"]},{\"type\":\"token\",\"token\":200010}]},{\"type\":\"sequence\",\"elements\":[{\"type\":\"token\",\"token\":200001},{\"type\":\"const_string\",\"value\":\"get_time\"},{\"type\":\"token\",\"token\":200049},{\"type\":\"json_schema\",\"json_schema\":{\"type\":\"object\",\"properties\":{\"name\":{\"const\":\"get_time\"},\"args\":{\"type\":\"object\",\"properties\":{\"zone\":{\"type\":\"string\",\"description\":\"IANA zone name\"}},\"required\":[\"zone\"]}},\"required\":[\"name\",\"args\"],\"additionalProperties\":false},\"max_whitespace_cnt\":32,\"excludes\":[\"<|message_\",\"<|content_\",\"<|end\",\"<|begin_of_text|>\",\"<|unused\"]},{\"type\":\"token\",\"token\":200010}]}]}}]}}"
+ },
+ {
+  "name": "so_tool_named",
+  "request": {
+   "model": "model",
+   "temperature": 0,
+   "reasoning_effort": "low",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "get_time",
+      "description": "Current local time in a time zone.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "zone": {
+         "type": "string",
+         "description": "IANA zone name"
+        }
+       },
+       "required": [
+        "zone"
+       ]
+      }
+     }
+    }
+   ],
+   "parallel_tool_calls": false,
+   "tool_choice": {
+    "type": "function",
+    "function": {
+     "name": "get_weather"
+    }
+   },
+   "messages": [
+    {
+     "role": "user",
+     "content": "Should I take an umbrella in Oslo today?"
+    }
+   ]
+  },
+  "grammar": "{\"type\":\"structural_tag\",\"format\":{\"type\":\"sequence\",\"elements\":[{\"type\":\"optional\",\"content\":{\"type\":\"sequence\",\"elements\":[{\"type\":\"token\",\"token\":200001},{\"type\":\"token\",\"token\":200008},{\"type\":\"any_tokens\",\"exclude_tokens\":[199998,199999,200000,200001,200002,200003,200004,200005,200006,200007,200008,200009,200010,200011,200012,200013,200014,200015,200016,200017,200018,200019,200020,200021,200022,200023,200024,200025,200026,200027,200028,200029,200030,200031,200032,200033,200034,200035,200036,200037,200038,200039,200040,200041,200042,200043,200044,200045,200046,200047,200048,200049,200050,200051,200052,200053,200054,200055,200056,200057]},{\"type\":\"token\",\"token\":200010}]}},{\"type\":\"sequence\",\"elements\":[{\"type\":\"token\",\"token\":200001},{\"type\":\"const_string\",\"value\":\"get_weather\"},{\"type\":\"token\",\"token\":200049},{\"type\":\"json_schema\",\"json_schema\":{\"type\":\"object\",\"properties\":{\"name\":{\"const\":\"get_weather\"},\"args\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"},\"unit\":{\"type\":\"string\",\"enum\":[\"celsius\",\"fahrenheit\"]}},\"required\":[\"city\"]}},\"required\":[\"name\",\"args\"],\"additionalProperties\":false},\"max_whitespace_cnt\":32,\"excludes\":[\"<|message_\",\"<|content_\",\"<|end\",\"<|begin_of_text|>\",\"<|unused\"]},{\"type\":\"token\",\"token\":200010}]}]}}"
+ },
+ {
+  "name": "so_thinking_schema",
+  "request": {
+   "model": "model",
+   "temperature": 0,
+   "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+     "name": "temperature",
+     "schema": {
+      "type": "object",
+      "properties": {
+       "celsius": {
+        "type": "number"
+       },
+       "feels": {
+        "type": "string",
+        "enum": [
+         "cold",
+         "mild",
+         "warm",
+         "hot"
+        ]
+       }
+      },
+      "required": [
+       "celsius",
+       "feels"
+      ],
+      "additionalProperties": false
+     },
+     "strict": true
+    }
+   },
+   "messages": [
+    {
+     "role": "user",
+     "content": "Convert 72 degrees Fahrenheit to Celsius and say how it feels."
+    }
+   ]
+  },
+  "grammar": "{\"type\":\"structural_tag\",\"format\":{\"type\":\"sequence\",\"elements\":[{\"type\":\"optional\",\"content\":{\"type\":\"sequence\",\"elements\":[{\"type\":\"token\",\"token\":200001},{\"type\":\"token\",\"token\":200008},{\"type\":\"any_tokens\",\"exclude_tokens\":[199998,199999,200000,200001,200002,200003,200004,200005,200006,200007,200008,200009,200010,200011,200012,200013,200014,200015,200016,200017,200018,200019,200020,200021,200022,200023,200024,200025,200026,200027,200028,200029,200030,200031,200032,200033,200034,200035,200036,200037,200038,200039,200040,200041,200042,200043,200044,200045,200046,200047,200048,200049,200050,200051,200052,200053,200054,200055,200056,200057]},{\"type\":\"token\",\"token\":200010}]}},{\"type\":\"token\",\"token\":200001},{\"type\":\"token\",\"token\":200004},{\"type\":\"json_schema\",\"json_schema\":{\"type\":\"object\",\"properties\":{\"celsius\":{\"type\":\"number\"},\"feels\":{\"type\":\"string\",\"enum\":[\"cold\",\"mild\",\"warm\",\"hot\"]}},\"required\":[\"celsius\",\"feels\"],\"additionalProperties\":false},\"max_whitespace_cnt\":32,\"excludes\":[\"<|message_\",\"<|content_\",\"<|end\",\"<|begin_of_text|>\",\"<|unused\"]},{\"type\":\"token\",\"token\":200010}]}}"
+ },
+ {
+  "name": "so_long_string",
+  "request": {
+   "model": "model",
+   "temperature": 0,
+   "reasoning_effort": "none",
+   "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+     "name": "story",
+     "schema": {
+      "type": "object",
+      "properties": {
+       "story": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9 ,.;:'!?-]{400,}$"
+       }
+      },
+      "required": [
+       "story"
+      ],
+      "additionalProperties": false
+     },
+     "strict": true
+    }
+   },
+   "messages": [
+    {
+     "role": "user",
+     "content": "Write a very short story about a lighthouse keeper."
+    }
+   ]
+  },
+  "grammar": "{\"type\":\"structural_tag\",\"format\":{\"type\":\"sequence\",\"elements\":[{\"type\":\"optional\",\"content\":{\"type\":\"sequence\",\"elements\":[{\"type\":\"token\",\"token\":200001},{\"type\":\"token\",\"token\":200008},{\"type\":\"any_tokens\",\"exclude_tokens\":[199998,199999,200000,200001,200002,200003,200004,200005,200006,200007,200008,200009,200010,200011,200012,200013,200014,200015,200016,200017,200018,200019,200020,200021,200022,200023,200024,200025,200026,200027,200028,200029,200030,200031,200032,200033,200034,200035,200036,200037,200038,200039,200040,200041,200042,200043,200044,200045,200046,200047,200048,200049,200050,200051,200052,200053,200054,200055,200056,200057]},{\"type\":\"token\",\"token\":200010}]}},{\"type\":\"token\",\"token\":200001},{\"type\":\"token\",\"token\":200004},{\"type\":\"json_schema\",\"json_schema\":{\"type\":\"object\",\"properties\":{\"story\":{\"type\":\"string\",\"pattern\":\"^[A-Za-z0-9 ,.;:'!?-]{400,}$\"}},\"required\":[\"story\"],\"additionalProperties\":false},\"max_whitespace_cnt\":32,\"excludes\":[\"<|message_\",\"<|content_\",\"<|end\",\"<|begin_of_text|>\",\"<|unused\"]},{\"type\":\"token\",\"token\":200010}]}}"
+ },
+ {
+  "name": "so_tool_required_single_sorted",
+  "request": {
+   "model": "model",
+   "temperature": 0,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "lookup",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "zeta": {
+         "type": "integer"
+        },
+        "Alpha": {
+         "type": "string"
+        },
+        "beta": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "zeta"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "get_time",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "zone": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "zone"
+       ]
+      }
+     }
+    }
+   ],
+   "tool_choice": "required",
+   "parallel_tool_calls": false,
+   "messages": [
+    {
+     "role": "user",
+     "content": "x"
+    }
+   ]
+  },
+  "grammar": "{\"type\":\"structural_tag\",\"format\":{\"type\":\"sequence\",\"elements\":[{\"type\":\"optional\",\"content\":{\"type\":\"sequence\",\"elements\":[{\"type\":\"token\",\"token\":200001},{\"type\":\"token\",\"token\":200008},{\"type\":\"any_tokens\",\"exclude_tokens\":[199998,199999,200000,200001,200002,200003,200004,200005,200006,200007,200008,200009,200010,200011,200012,200013,200014,200015,200016,200017,200018,200019,200020,200021,200022,200023,200024,200025,200026,200027,200028,200029,200030,200031,200032,200033,200034,200035,200036,200037,200038,200039,200040,200041,200042,200043,200044,200045,200046,200047,200048,200049,200050,200051,200052,200053,200054,200055,200056,200057]},{\"type\":\"token\",\"token\":200010}]}},{\"type\":\"or\",\"elements\":[{\"type\":\"sequence\",\"elements\":[{\"type\":\"token\",\"token\":200001},{\"type\":\"const_string\",\"value\":\"lookup\"},{\"type\":\"token\",\"token\":200049},{\"type\":\"json_schema\",\"json_schema\":{\"type\":\"object\",\"properties\":{\"name\":{\"const\":\"lookup\"},\"args\":{\"type\":\"object\",\"properties\":{\"Alpha\":{\"type\":\"string\"},\"beta\":{\"type\":\"boolean\"},\"zeta\":{\"type\":\"integer\"}},\"required\":[\"zeta\"]}},\"required\":[\"name\",\"args\"],\"additionalProperties\":false},\"max_whitespace_cnt\":32,\"excludes\":[\"<|message_\",\"<|content_\",\"<|end\",\"<|begin_of_text|>\",\"<|unused\"]},{\"type\":\"token\",\"token\":200010}]},{\"type\":\"sequence\",\"elements\":[{\"type\":\"token\",\"token\":200001},{\"type\":\"const_string\",\"value\":\"get_time\"},{\"type\":\"token\",\"token\":200049},{\"type\":\"json_schema\",\"json_schema\":{\"type\":\"object\",\"properties\":{\"name\":{\"const\":\"get_time\"},\"args\":{\"type\":\"object\",\"properties\":{\"zone\":{\"type\":\"string\"}},\"required\":[\"zone\"]}},\"required\":[\"name\",\"args\"],\"additionalProperties\":false},\"max_whitespace_cnt\":32,\"excludes\":[\"<|message_\",\"<|content_\",\"<|end\",\"<|begin_of_text|>\",\"<|unused\"]},{\"type\":\"token\",\"token\":200010}]}]}]}}"
+ }
+]

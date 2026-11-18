@@ -13,6 +13,8 @@ pub const Result = struct {
     calls: ?[]V,
     reasoning_tokens: usize,
     rejected: bool = false,
+    /// Inkling 2: the reply tokens whose bytes are the content, in order (its logprob rows); null: not tracked.
+    content_at: ?[]const usize = null,
 };
 const Tag = enum { message, think, response, tools, call, argument, json };
 const Header = struct { tag: Tag, attrs: *json.Object };

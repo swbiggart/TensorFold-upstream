@@ -42,6 +42,7 @@ pub const Generation = struct {
     collected: std.ArrayList(u32) = .empty,
     visible: reply_text.Incremental = .{},
     kimi: ?@import("kimi_reply.zig").Stream = null,
+    inkling2: ?@import("chat_inkling2.zig").Stream = null,
     hidden: std.ArrayList(u8) = .empty, // reused for the answer without its call blocks
     streamed: reply_text.Shown = .{}, // what content streamed, kept apart from the decode buffer that grows under slices
     streamed_reasoning: reply_text.Shown = .{},
@@ -108,6 +109,7 @@ pub const Generation = struct {
         const all = try g.visible.extend(g.a, g.srv.text, reply_text.decodeText, fresh.items);
         if (g.visible.pending()) return; // a character still split across tokens
         if (g.srv.text.vtable.format == .kimi) return @import("chat_kimi.zig").stream(g, sink);
+        if (g.srv.text.vtable.format == .inkling2 and g.chat) return @import("chat_inkling2.zig").stream(g, sink);
         const raw_visible = g.stops.visible(all, true);
         const text = try @import("tool_minimax.zig").dsml(g.a, raw_visible, g.tools); // MiniMax-M3's calls as DSML
         var answer = text;
@@ -231,7 +233,12 @@ pub const Generation = struct {
         const finished_ns = nowNs(g.srv.io);
         const content_tokens = if (g.ignore_eos) g.collected.items else reply_text.stripTrailing(g.collected.items, g.srv.eos);
         const raw = try g.srv.text.decode(a, content_tokens);
-        const native = if (g.srv.text.vtable.format == .kimi) try @import("chat_kimi.zig").read(g, content_tokens, true) else null;
+        const native = if (g.srv.text.vtable.format == .kimi)
+            try @import("chat_kimi.zig").read(g, content_tokens, true)
+        else if (g.srv.text.vtable.format == .inkling2 and g.chat)
+            try @import("chat_inkling2.zig").read(g, content_tokens, true)
+        else
+            null;
         const raw_visible = g.stops.visible(raw, false);
         const visible = if (native) |n| n.content else try @import("tool_minimax.zig").dsml(a, raw_visible, g.tools);
         // closed before the think split, so a call ending an unclosed think block is the answer
@@ -240,7 +247,8 @@ pub const Generation = struct {
         var content: []const u8 = text;
         var reasoning: ?[]const u8 = null;
         if (native) |n| {
-            const r = reply_text.pyStrip(n.reasoning);
+            // Inkling 2's response template reads its parts with strip: false
+            const r = if (g.srv.text.vtable.format == .inkling2) n.reasoning else reply_text.pyStrip(n.reasoning);
             reasoning = if (r.len > 0) r else null;
         } else if (g.thinking) {
             const original_close = try reply_text.closeWhere(a, reply_text.decodeText, g.srv.text, content_tokens, g.srv.close_id);
@@ -262,7 +270,11 @@ pub const Generation = struct {
             const shown = if (g.calls != null) try tool_stream.endProse(a, content, if (g.thinking) content else text, g.tools, reason, g.single) else content;
             const sent = g.streamed.text.items;
             const rest = if (std.mem.startsWith(u8, shown, sent) and shown.len > sent.len) shown[sent.len..] else "";
-            if (g.lp) |*l| (if (try l.delta(g.srv, a, g.thinking, g.ignore_eos, g.collected.items, rest, shown.len, true)) |d| try g.emit(sink, d)) else if (rest.len > 0) try g.emit(sink, .{ .string = rest });
+            if (g.lp) |*l| {
+                const at = if (native) |n| n.content_at else null;
+                const last = if (at) |positions| try l.deltaAt(g.srv, a, g.collected.items, positions, rest, shown.len, true) else try l.delta(g.srv, a, g.thinking, g.ignore_eos, g.collected.items, rest, shown.len, true);
+                if (last) |d| try g.emit(sink, d);
+            } else if (rest.len > 0) try g.emit(sink, .{ .string = rest });
             if (g.calls) |*c| if (close.len > 0 or std.mem.eql(u8, reason, "length")) {
                 // the streamer reads the closers as markup the model wrote, so the call ends with the same deltas
                 var out: std.ArrayList(Value) = .empty;
@@ -337,7 +349,7 @@ pub const Generation = struct {
             .speculative = .{ .object = spec },
             .thinking = thinking,
             .effort = effort,
-            .logprobs = if (g.lp) |l| try @import("logprobs.zig").value(g.srv, cx, a, g.thinking, content_tokens, l.rows.items) else null,
+            .logprobs = if (g.lp) |l| (if (if (native) |n| n.content_at else null) |at| try @import("logprobs.zig").valueAt(g.srv, cx, a, content_tokens, l.rows.items, at) else try @import("logprobs.zig").value(g.srv, cx, a, g.thinking, content_tokens, l.rows.items)) else null,
             .prompt_logprobs = if (m.prompt_rows) |r| try @import("logprobs.zig").promptValue(g.srv, a, r) else null,
             .loop_stop = stopped,
         };
@@ -351,7 +363,39 @@ pub const Generation = struct {
         var seed_text: [32]u8 = undefined;
         const seed = if (g.seed) |v| std.fmt.bufPrint(&seed_text, " seed={d}", .{v}) catch unreachable else "";
         const rate = if (decode_log_s > 0) @as(f64, @floatFromInt(decode_tokens)) / decode_log_s else 0;
-        log.line("done {s} prompt={d} cached={d} thinking={s} effort={s} tokens={d} sha={s} finish={s}{s} rounds={d} accepted={d}/{d} ttft={d:.3} decode={d:.3} elapsed={d:.3} queued={d:.3} tok/s={d:.1}{s}", .{ g.reply_id, prompt_len, reply.cached_tokens, if (thinking) "True" else "False", if (thinking) effort orelse "none" else "none", g.collected.items.len, sha, reason, cycle, s.rounds, s.accepted, s.drafted, ttft_s, decode_log_s, @max(0, seconds(done_ns - received)), s.queued_seconds, rate, seed });
+        var drafts_text: [320]u8 = undefined;
+        const counts = draftCounts(&drafts_text, s);
+        log.line("done {s} prompt={d} cached={d} thinking={s} effort={s} tokens={d} sha={s} finish={s}{s} rounds={d} accepted={d}/{d} ttft={d:.3} decode={d:.3} elapsed={d:.3} queued={d:.3} tok/s={d:.1}{s}{s}", .{ g.reply_id, prompt_len, reply.cached_tokens, if (thinking) "True" else "False", if (thinking) effort orelse "none" else "none", g.collected.items.len, sha, reason, cycle, s.rounds, s.accepted, s.drafted, ttft_s, decode_log_s, @max(0, seconds(done_ns - received)), s.queued_seconds, rate, seed, counts });
         return reply;
     }
 };
+
+/// The done line's draft counts of a drafted reply (empty otherwise): ` depths=D:rounds/accepted,...` by drafts
+/// verified a round, ` kept=K:rounds,...` by drafts accepted a round (the last bucket: that or more), and the
+/// backend's ` stale=N` drafts made from stale taps and ` gap=MS` mean host time from a draft's return to the next
+/// verify, when it reports them.
+fn draftCounts(buf: []u8, s: anytype) []const u8 {
+    var drafted = false;
+    for (s.depth_rounds[1..]) |n| drafted = drafted or n > 0;
+    if (!drafted) return "";
+    var w: std.Io.Writer = .fixed(buf);
+    w.writeAll(" depths=") catch return "";
+    var first = true;
+    var d: usize = s.depth_rounds.len;
+    while (d > 0) {
+        d -= 1;
+        if (s.depth_rounds[d] == 0) continue;
+        w.print("{s}{d}:{d}/{d}", .{ if (first) "" else ",", d, s.depth_rounds[d], s.depth_kept[d] }) catch return "";
+        first = false;
+    }
+    w.writeAll(" kept=") catch return "";
+    first = true;
+    for (s.kept_rounds, 0..) |n, k| {
+        if (n == 0) continue;
+        w.print("{s}{d}:{d}", .{ if (first) "" else ",", k, n }) catch return "";
+        first = false;
+    }
+    w.print(" stale={d}", .{s.stale_drafts}) catch return "";
+    if (s.draft_gap_ms) |g| w.print(" gap={d:.2}", .{g}) catch return "";
+    return w.buffered();
+}

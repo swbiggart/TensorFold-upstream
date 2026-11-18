@@ -62,6 +62,7 @@ pub const dspine = @import("dspine.zig");
 pub const tree_round = @import("tree_round.zig");
 pub const attention_ref = @import("attention_ref.zig");
 pub const attention_range = @import("attention_range.zig");
+pub const relbias_attention_ref = @import("relbias_attention_ref.zig");
 pub const gdn_prep_ref = @import("gdn_prep_ref.zig");
 pub const qk_ref = @import("qk_ref.zig");
 pub const moe_ref = @import("moe_ref.zig");
@@ -103,6 +104,7 @@ test {
     _ = tree_round;
     _ = attention_ref;
     _ = attention_range;
+    _ = relbias_attention_ref;
     _ = gdn_prep_ref;
     _ = qk_ref;
     _ = moe_ref;

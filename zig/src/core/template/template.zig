@@ -133,13 +133,39 @@ pub fn renderProvenanceGlobals(gpa: Allocator, t: *const Compiled, messages: std
     return .{ .s = text, .spans = try gpa.dupe(Span, out.spans.items) };
 }
 
+/// Transformers' ``_alias_reasoning_fields``: a message's first non-null reasoning_content, thinking or reasoning
+/// also fills ``reasoning_content`` (and ``thinking`` where the message has none), as apply_chat_template does.
+/// Rewritten in Zig from Hugging Face Transformers' utils/chat_template_utils.py (Copyright 2024 The HuggingFace Team,
+/// Apache License 2.0); see THIRD_PARTY_NOTICES.md.
+fn aliasReasoning(a: Allocator, messages: std.json.Value) Allocator.Error!std.json.Value {
+    if (messages != .array) return messages;
+    var out: ?std.json.Array = null;
+    for (messages.array.items, 0..) |m, i| {
+        if (m != .object) continue;
+        const reasoning = for ([_][]const u8{ "reasoning_content", "thinking", "reasoning" }) |key| {
+            if (m.object.get(key)) |r| if (r != .null) break r;
+        } else continue;
+        if (out == null) {
+            out = .init(a);
+            try out.?.appendSlice(messages.array.items);
+        }
+        var map: std.json.ObjectMap = .empty;
+        try map.put(a, "thinking", reasoning);
+        var it = m.object.iterator();
+        while (it.next()) |e| try map.put(a, e.key_ptr.*, e.value_ptr.*);
+        try map.put(a, "reasoning_content", reasoning);
+        out.?.items[i] = .{ .object = map };
+    }
+    return if (out) |list| .{ .array = list } else messages;
+}
+
 fn run(c: *eval.Ctx, vars: *v.Map, t: *const Compiled, messages: std.json.Value, tools: std.json.Value, context: std.json.Value, template_globals: std.json.Value, add_generation_prompt: bool) v.Error!void {
     const a = c.rt.a;
     if (template_globals == .object) {
         var it = template_globals.object.iterator();
         while (it.next()) |e| try vars.put(a, e.key_ptr.*, try pyjson.fromJsonDerived(&c.rt, e.value_ptr.*, false));
     }
-    try vars.put(a, "messages", try pyjson.fromJson(&c.rt, messages));
+    try vars.put(a, "messages", try pyjson.fromJson(&c.rt, try aliasReasoning(a, messages)));
     try vars.put(a, "tools", try pyjson.fromJson(&c.rt, tools));
     try vars.put(a, "documents", .none);
     try vars.put(a, "add_generation_prompt", .{ .boolean = add_generation_prompt });
@@ -166,4 +192,5 @@ test {
     _ = @import("unicode.zig");
     _ = @import("value.zig");
     _ = @import("provenance_test.zig");
+    _ = @import("pyfloat.zig");
 }

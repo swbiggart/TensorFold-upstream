@@ -56,6 +56,7 @@ pub fn openHealth(srv: *Server, a: Allocator, reset_peak: bool) !Value {
     }
     try o.put(a, "memory", .{ .object = memory });
     try o.put(a, "live", try live.snapshot(a, status));
+    if (status.kv) |kv| try o.put(a, "kv", try kvValue(a, kv, status));
     const ident = srv.config.identity;
     for ([_][2][]const u8{
         .{ "version", ident.version },
@@ -64,6 +65,74 @@ pub fn openHealth(srv: *Server, a: Allocator, reset_peak: bool) !Value {
     }) |field|
         if (field[1].len > 0) try o.put(a, field[0], .{ .string = field[1] });
     return .{ .object = o };
+}
+
+/// /health's ``kv``: a backend's own KV page pool (Status.kv) in pages and positions, the streams against their cap,
+/// what the prompt cache keeps, and the admission state: ``open`` (a new request starts now if its pages are free),
+/// ``streams_full`` (every stream is busy: new requests wait for one), ``waiting_for_pages`` (a request waits for
+/// pages to come free).
+pub fn kvValue(a: Allocator, kv: api.Status.Kv, status: api.Status) Allocator.Error!Value {
+    const o = try json.newObject(a);
+    const t: u64 = kv.page_tokens;
+    try o.put(a, "page_positions", try json.intValue(a, t));
+    try o.put(a, "pages_total", try json.intValue(a, kv.pages));
+    try o.put(a, "pages_free", try json.intValue(a, kv.free));
+    try o.put(a, "pages_available", try json.intValue(a, kv.available));
+    try o.put(a, "pages_kept_by_prompt_cache", try json.intValue(a, kv.kept));
+    try o.put(a, "positions_total", try json.intValue(a, kv.pages * t));
+    try o.put(a, "positions_free", try json.intValue(a, kv.free * t));
+    try o.put(a, "positions_available", try json.intValue(a, kv.available * t));
+    try o.put(a, "positions_kept_by_prompt_cache", try json.intValue(a, kv.kept * t));
+    try o.put(a, "largest_request_positions", try json.intValue(a, kv.request_tokens));
+    if (status.prompt_cache) |c| {
+        try o.put(a, "prompt_cache_states", try json.intValue(a, c.states));
+        try o.put(a, "prompt_cache_bytes", try json.intValue(a, c.bytes));
+        try o.put(a, "prompt_cache_budget_bytes", try json.intValue(a, c.budget_bytes));
+    }
+    try o.put(a, "streams_active", try json.intValue(a, status.running));
+    try o.put(a, "streams", try json.intValue(a, kv.streams));
+    try o.put(a, "max_streams", try json.intValue(a, kv.max_streams));
+    try o.put(a, "requests_waiting", try json.intValue(a, status.waiting));
+    try o.put(a, "admission", .{ .string = admission(kv, status) });
+    try o.put(a, "waiting_request_pages", try json.intValue(a, if (status.waiting > 0) kv.waiting_pages else 0));
+    try o.put(a, "requests_waited_for_pages", try json.intValue(a, kv.page_waits));
+    return .{ .object = o };
+}
+
+fn admission(kv: api.Status.Kv, status: api.Status) []const u8 {
+    if (kv.streams > 0 and status.running >= kv.streams) return "streams_full";
+    if (status.waiting > 0 and kv.waiting_pages > 0) return "waiting_for_pages";
+    return "open";
+}
+
+test "health's kv: pages and positions, the streams against the cap, and the admission state" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const kv: api.Status.Kv = .{ .page_tokens = 256, .pages = 2052, .free = 2000, .available = 1990, .request_tokens = 131072, .streams = 4, .max_streams = 4, .waiting_pages = 0, .page_waits = 3 };
+    const idle = (try kvValue(a, kv, .{})).object;
+    try expectInt(idle, "positions_total", 2052 * 256);
+    try expectInt(idle, "positions_free", 2000 * 256);
+    try expectInt(idle, "pages_kept_by_prompt_cache", 0);
+    try expectInt(idle, "max_streams", 4);
+    try std.testing.expectEqualStrings("open", idle.get("admission").?.string);
+    try std.testing.expect(idle.get("prompt_cache_bytes") == null);
+    const full = (try kvValue(a, kv, .{ .running = 4, .waiting = 1 })).object;
+    try std.testing.expectEqualStrings("streams_full", full.get("admission").?.string);
+    var held = kv;
+    held.waiting_pages = 600;
+    const w = (try kvValue(a, held, .{ .running = 2, .waiting = 1, .prompt_cache = .{ .states = 2, .bytes = 1 << 30, .budget_bytes = 3 << 29 } })).object;
+    try std.testing.expectEqualStrings("waiting_for_pages", w.get("admission").?.string);
+    try expectInt(w, "waiting_request_pages", 600);
+    try expectInt(w, "streams_active", 2);
+    try expectInt(w, "prompt_cache_bytes", 1 << 30);
+    // a held request that has gone (cancelled) leaves no wait behind
+    try std.testing.expectEqualStrings("open", (try kvValue(a, held, .{ .running = 2 })).object.get("admission").?.string);
+}
+
+fn expectInt(o: *json.Object, key: []const u8, want: u64) !void {
+    var buf: [24]u8 = undefined;
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&buf, "{d}", .{want}), o.get(key).?.int);
 }
 
 /// Facts an attached benchmark may copy. A missing or rejected manifest leaves the run unranked.

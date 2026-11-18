@@ -12,6 +12,12 @@ pub const FsrSource = struct {
     read: *const fn (*anyopaque) ?Status.FsrCache,
 };
 
+/// A backend's KV page pool counts, copied by its engine thread at each change; read from any thread, no device work.
+pub const KvSource = struct {
+    ctx: *anyopaque,
+    read: *const fn (*anyopaque) ?Status.Kv,
+};
+
 pub const Status = struct {
     healthy: bool = true,
     /// Engine-thread publication; all retained states, including long-message interior cuts and spare storage.
@@ -20,6 +26,8 @@ pub const Status = struct {
     disk: ?DiskCache = null,
     /// The FSR SSD-expert cache's copied snapshot: null when FSR is off.
     fsr: ?FsrCache = null,
+    /// The KV page pool's capacity and admission counts (KvSource): null when the backend reports none.
+    kv: ?Kv = null,
     /// Requests in prefill or decode, and those waiting for a lane.
     running: u32 = 0,
     waiting: u32 = 0,
@@ -40,6 +48,26 @@ pub const Status = struct {
     /// Changes whenever the filling set does: a reader pairs its drain samples with one fill.
     fill_run: u64 = 0,
 
+    /// A backend's own KV page pool (Inkling-2's): /health's ``kv``. Pages hold `page_tokens` positions each.
+    pub const Kv = struct {
+        page_tokens: u32 = 0,
+        pages: u64 = 0, // the pool's pages
+        free: u64 = 0, // pages nothing holds
+        available: u64 = 0, // free pages not promised to an admitted stream
+        kept: u64 = 0, // pages only the prompt cache's kept states hold (0 while it keeps copies outside the pool)
+        request_tokens: u64 = 0, // the most positions one request may hold (--context)
+        streams: u32 = 0, // streams served at once
+        max_streams: u32 = 0, // the cap on the streams the server counts at start-up
+        waiting_pages: u64 = 0, // what a request held back for pages needs (0: none is)
+        page_waits: u64 = 0, // requests held back for pages since start
+
+        /// A family's own counts struct with these fields (Inkling-2's lives in a module without engine_api).
+        pub fn from(counts: anytype) Kv {
+            var out: Kv = .{};
+            inline for (@typeInfo(Kv).@"struct".field_names) |name| @field(out, name) = @field(counts, name);
+            return out;
+        }
+    };
     pub const PromptCache = struct {
         states: u64 = 0,
         bytes: u64 = 0,

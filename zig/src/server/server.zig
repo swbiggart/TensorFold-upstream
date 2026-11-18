@@ -179,6 +179,8 @@ pub const Server = struct {
     grammars: ?*api.grammar.Compiler = null,
     grammar_problem: ?[]const u8 = null,
     grammar_mutex: std.Io.Mutex = .init,
+    /// Inkling 2's marker and added token ids for its reply grammar (inkling2_grammar.zig); null for other models.
+    inkling2_ids: ?@import("inkling2_grammar.zig").Ids = null,
     /// The facts the learner was taught and whether the weights recall them.
     slide: slide_graph.Graph,
     teacher: slide_lesson.Teacher, // what every Sliding Weights lesson shares: keep prompts, the turn's end
@@ -193,6 +195,7 @@ pub const Server = struct {
     pub fn media(srv: *const Server) @import("messages.zig").Media {
         var result = @import("messages.zig").Media.ofVision(srv.info.vision, srv.config.vision_pdf);
         result.native_deepseek = srv.text.native_deepseek;
+        if (srv.text.vtable.format == .inkling2 and srv.info.vision == null) result.text_only = @import("inkling2_reply.zig").image_refusal;
         return result;
     }
 
@@ -247,7 +250,11 @@ pub const Server = struct {
             srv.think_close = try std.mem.concat(a, u32, &.{ lead, &.{end}, trail });
             srv.think_close_end = end;
         }
-        srv.info.thinking_applicable = srv.close_id != null;
+        // Inkling 2 marks its thinking as a typed part and switches it off with its effort line (effort "none")
+        const inkling2 = text.vtable.format == .inkling2;
+        if (inkling2) srv.thinking_switch = true;
+        if (inkling2) srv.inkling2_ids = try @import("inkling2_grammar.zig").Ids.of(a, text);
+        srv.info.thinking_applicable = srv.close_id != null or inkling2;
         srv.info.thinking_switch = try @import("prompt.zig").thinkingSwitch(srv);
         if (srv.info.prefill_step > 0) {
             srv.chunks = try chunk_plan.markers(srv, a, srv.info.prefill_step);
@@ -347,17 +354,18 @@ pub const Server = struct {
         errdefer srv.release(false, request.*); // a refused request frees what it compiled here
         const required = if (f.get("tool_call_required")) |r| r.truthy() else false;
         const one_call = if (f.get("tool_call_single")) |x| x.truthy() else false;
+        const inkling2 = srv.text.vtable.format == .inkling2; // auto with strict tools stays unconstrained there
         const all = has_tools and !required and (tool_grammar.autoAllEnv() catch return cx.fail(.server, "invalid TF_DSV41_TOOL_GRAMMAR: expected 0 or 1", .{}));
         if (has_tools and required) {
             if (!srv.info.capability(.structures)) return cx.fail(.request, "backend '{s}' cannot enforce tool_choice \"required\" or a named function: it has no token grammar support; send \"auto\" or \"none\"", .{srv.backendName()});
             request.structure = try tool_grammar.structure(srv, cx, tools, !one_call, thinking);
-        } else if (has_tools and srv.info.capability(.structures) and tool_grammar.autoWanted(tools, all) and srv.grammarCompiler() != null) {
+        } else if (has_tools and !inkling2 and srv.info.capability(.structures) and tool_grammar.autoWanted(tools, all) and srv.grammarCompiler() != null) {
             // auto with a strict tool (any, TENSORFOLD_TOOL_GRAMMAR=1): text or calls; no grammar library, no grammar
             request.structure = try tool_grammar.optionalStructure(srv, cx, tools, all, !one_call, thinking);
         }
         if (try grammar.spec(cx, f)) |s| {
             if (!srv.info.capability(.structures)) return cx.refuse("structured output (response_format and the guided_* fields) is not supported by this engine yet");
-            const st = try srv.compiledStructure(cx, s.kind, s.text, s.field, thinking);
+            const st = if (inkling2) try @import("inkling2_grammar.zig").structure(srv, cx, s, thinking) else try srv.compiledStructure(cx, s.kind, s.text, s.field, thinking);
             if (request.structure) |tool| tool.free();
             request.structure = st;
         }
@@ -376,7 +384,9 @@ pub const Server = struct {
         var err: [512]u8 = undefined;
         const compiled = c.compile(srv.io, @fromBackingInt(@intCast(@backingInt(kind))), text, &err) catch
             return cx.fail(.request, "{s}: the grammar cannot be enforced: {s}", .{ field, std.mem.sliceTo(&err, 0) });
-        return .{ .kind = kind, .field = field, .text = text, .after = if (thinking) srv.text.tokenId(srv.markers.close) else null, .compiler = c, .compiled = compiled };
+        // Inkling 2 has no end-of-thinking token: its grammar covers the whole reply, its thinking part included
+        const after = if (thinking and srv.text.vtable.format != .inkling2) srv.text.tokenId(srv.markers.close) else null;
+        return .{ .kind = kind, .field = field, .text = text, .after = after, .compiler = c, .compiled = compiled };
     }
 
     /// grammar_budget: a boolean; true keeps a grammar's reply completable within max_tokens (none without a grammar).
