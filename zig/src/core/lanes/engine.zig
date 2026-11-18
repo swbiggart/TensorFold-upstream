@@ -47,6 +47,8 @@ pub const Engine = struct {
     shared_rounds: u64 = 0,
     late: @import("late_draft.zig").State = .{},
     alone: bool = true, // this step has one live stream: its copies may take their ramp
+    shared_open: bool = false, // shared_cut: this shared round may price its streams' drafts by chances (Rule.sharedOpen)
+    live_streams: usize = 0, // the streams live at this step, before the shared round takes its turns
     lone_kept: [2][lone_costs.bands]?lone_costs.Kept = @splat(@splat(null)), // the newest lone calibrations, greedy then sampled, a band each
     steps: u64 = 0,
     grammar_round: @import("grammar_time.zig").Round = .{},
@@ -70,12 +72,16 @@ pub const Engine = struct {
                 .shared_costs = &cfg.shared_costs,
                 .mtp_step_ms = cfg.mtp_step_ms,
                 .draft_step_ms = cfg.draft_step_ms,
+                .context_costs = cfg.context_costs,
+                .depth_from = cfg.depth_from,
+                .ab_modes = cfg.depth_ab,
                 .plain_guard = cfg.plain_guard,
                 .node_probabilities = cfg.node_probabilities,
                 .granted_depth = cfg.granted_depth,
                 .confidence_floor = cfg.draft_confidence,
                 .batch_rows = cfg.batch_rows,
                 .batched_heads = cfg.draft_streams,
+                .draft_pass = cfg.draft_pass,
             },
         };
     }
@@ -138,6 +144,7 @@ pub const Engine = struct {
             live.shrinkRetainingCapacity(kept);
         }
         e.alone = live.items.len == 1;
+        e.live_streams = live.items.len;
         if (!e.alone) for (live.items) |s| {
             s.shared_round = true;
         };
@@ -200,12 +207,16 @@ pub const Engine = struct {
     /// One stream's round: verify pending and drafted tokens together, keep drafts to the first mismatch.
     fn familyRound(e: *Engine, s: *Stream, copied: ?win.Copy) !Result {
         e.clock.start();
+        if (e.backend.vtable.shared_round) |told| told(e.backend.ptr, false); // a lone round: no chances for left-out streams
         try e.late.flush(e, Engine.askDrafts);
         const priced = s.priced;
         s.priced = null;
         const a = e.arena.allocator();
         var plans = [_]Plan{try win.plan(e, s, copied)};
-        if (plans[0].kind == .head and (e.cfg.node_probabilities or e.trim != null or lone_costs.enabled(e, plans[0]))) try win.allocate(e, &plans);
+        const lone_cut = if (plans[0].kind == .head and (e.cfg.node_probabilities or e.trim != null or lone_costs.enabled(e, plans[0]))) c: {
+            try win.allocate(e, &plans);
+            break :c null;
+        } else try win.cutLone(e, &plans[0]);
         try win.constrain(e, &plans[0]);
         const plan = plans[0];
         const early = e.cfg.family_mtp and s.drafts and plan.kind != .forced and e.cfg.speculate_early and plan.parents == null and s.grammar == null;
@@ -222,16 +233,19 @@ pub const Engine = struct {
             if (early and o.cut == null) {
                 var w = win.who(s);
                 const d: u32 = @intCast(try e.rule.headDepth(&w, null, win.probe(e)));
+                s.asked = d;
+                s.deepened = false;
                 try e.askDrafts(&.{.{ .stream = s, .follow = o.follow, .rows = o.path, .start = plan.position, .position = s.cache_len + 1, .depth = d, .early = true }});
             } else {
                 if (early) if (e.backend.vtable.unspeculate) |undo| try undo(e.backend.ptr, s);
                 try e.draftLate(s, plan.position, o.follow, o.path, null);
             }
-            if (e.cfg.timed and (plan.kind == .head or (plan.kind == .none and e.cfg.plain_guard))) {
+            if (e.cfg.timed and (plan.kind == .head or (plan.kind == .none and (e.cfg.plain_guard or e.cfg.context_costs.len > 0)))) {
                 const ms = e.clock.elapsedMs(.cost);
                 const first = s.rounds == 1; // a stream's first round carries the prefill-to-decode switch
                 try trail.event(e, &.{ f("ev", str("cost")), f("stream", str(s.id)), f("drafts", int(rows - 1)), f("init", .{ .bool = first }), f("ms", ev.bits(ms)) });
                 try e.rule.observeCost(@intCast(rows - 1), ms, first, win.who(s));
+                if (lone_cut != null and !first) e.rule.observeCut(@intCast(rows - 1), ms, plan.position);
                 lone_costs.observe(s, plan.cost_probe_rows, rows, ms);
             }
         }
@@ -248,7 +262,7 @@ pub const Engine = struct {
         if (e.cfg.timed and plan.kind == .head) {
             const ms = e.clock.elapsedMs(.overhead);
             try trail.event(e, &.{ f("ev", str("overhead")), f("streams", int(1)), f("rows", int(rows)), f("ms", ev.bits(ms)) });
-            try e.rule.observeOverhead(1, rows, ms, s.sampling != null, 0.0);
+            try e.rule.observeOverheadAt(1, rows, ms, s.sampling != null, 0.0, try e.rule.streamDepthMs(win.who(s), @intCast(rows - 1)));
         }
         if (e.backend.round_observer != null) e.backend.observed(&.{o.path});
         return .{ .rows = @intCast(rows), .keep = @intCast(o.path.len), .got = o.got };
@@ -259,6 +273,9 @@ pub const Engine = struct {
         e.clock.start();
         try e.late.flush(e, Engine.askDrafts);
         const a = e.arena.allocator();
+        e.shared_open = e.cfg.shared_cut != .off and entries.len >= 2 and e.rule.sharedOpen(e.live_streams);
+        if (e.backend.vtable.shared_round) |told| told(e.backend.ptr, e.shared_open);
+        defer e.shared_open = false;
         const plans = try a.alloc(Plan, entries.len);
         for (entries, plans) |s, *p| p.* = try win.plan(e, s, null);
         try win.allocate(e, plans);
@@ -301,11 +318,19 @@ pub const Engine = struct {
             const requests = try a.alloc(be.DraftRequest, heads.items.len);
             for (requests, heads.items, budgets) |*r, i, d| {
                 const s = plans[i].stream;
-                r.* = .{ .stream = s, .follow = outcomes[i].follow, .rows = outcomes[i].path, .start = plans[i].position, .position = s.cache_len + 1, .depth = @intCast(d) };
+                s.asked = @intCast(@max(0, d));
+                const depth_asked = e.deepened(s, d);
+                s.deepened = depth_asked > d;
+                r.* = .{ .stream = s, .follow = outcomes[i].follow, .rows = outcomes[i].path, .start = plans[i].position, .position = s.cache_len + 1, .depth = @intCast(depth_asked) };
             }
             try e.askDrafts(requests);
         } else {
-            for (heads.items, budgets) |i, d| try e.draftLate(plans[i].stream, plans[i].position, outcomes[i].follow, outcomes[i].path, d);
+            for (heads.items, budgets) |i, d| {
+                plans[i].stream.asked = @intCast(@max(0, d));
+                const depth_asked = e.deepened(plans[i].stream, d);
+                plans[i].stream.deepened = depth_asked > d;
+                try e.draftLate(plans[i].stream, plans[i].position, outcomes[i].follow, outcomes[i].path, depth_asked);
+            }
         }
         if (e.cfg.root_copies) for (heads.items, budgets) |i, *d| {
             if (plans[i].stream.next) |held| if (held.count == 0) {
@@ -319,9 +344,26 @@ pub const Engine = struct {
             for (budgets) |d| steps = if (e.cfg.draft_streams and depth.pricedBatched()) @max(steps, d - 1) else steps + @max(0, d - 1);
             const ms = e.clock.elapsedMs(.overhead) - e.cfg.draft_step_ms * @as(f64, @floatFromInt(steps));
             try trail.event(e, &.{ f("ev", str("overhead")), f("streams", int(plans.len)), f("rows", int(total)), f("ms", ev.bits(ms)) });
-            try e.rule.observeOverhead(@intCast(plans.len), total, ms, sampled, e.rule.headMs(budgets));
+            // what the streams' depth took of it (context_costs) is no overhead either
+            var depth_ms: f64 = 0;
+            if (e.cfg.context_costs.len > 0) for (plans, windows) |p, w| {
+                depth_ms += try e.rule.streamDepthMs(win.who(p.stream), @intCast(w.rows() - 1));
+            };
+            // shared_cut: a round whose drafts were all cut after the pass ran for their chances is neither a plain
+            // round (it paid the pass and the read) nor a drafted one (it verified none): not timed
+            var priced = false;
+            for (plans) |p| priced = priced or p.chance_priced;
+            if (!(priced and total == plans.len)) try e.rule.observeOverheadAt(@intCast(plans.len), total, ms, sampled, e.rule.headMs(budgets), depth_ms);
         }
         if (e.backend.round_observer != null) e.backend.observed(paths);
+    }
+
+    /// shared_cut `deepen`: a drafting greedy stream of a shared round at or below depth_from drafts its whole block (as
+    /// deep as its room lets), and the next round's allocation verifies the prefix its chances pay for; else the budget.
+    fn deepened(e: *const Engine, s: *const Stream, d: i64) i64 {
+        if (e.cfg.shared_cut != .deepen or !e.shared_open or d <= 0 or s.sampling != null or s.grammar != null) return d;
+        if (e.cfg.context_costs.len > 0 and s.cache_len > e.cfg.depth_from) return d; // past it the depth rule's ramp holds
+        return @max(d, @min(@as(i64, e.cfg.most_drafts), s.draftRoom() - 1));
     }
 
     /// Commit the target-sampled path (after the thinking budget's cut), each token with its path row's logprob row.
@@ -363,7 +405,15 @@ pub const Engine = struct {
                     const chain = if (p.branch_from > 0) ds[0..p.branch_from] else ds[0..own_end];
                     var chain_kept: usize = 0;
                     for (path[1..]) |r| chain_kept += @intFromBool((p.branch_from == 0 or r < p.branch_from) and r < own_end);
-                    try e.rule.observeDepth(win.who(s), std.mem.max(u32, chain), @intCast(chain_kept));
+                    const verified = std.mem.max(u32, chain);
+                    if (!p.chance_priced) {
+                        try e.rule.observeDepth(win.who(s), verified, @intCast(chain_kept));
+                    } else if (s.asked > 0 and verified >= s.asked) {
+                        // shared_cut: a chain cut short of what the rule asked says nothing of the drafts it cut (they
+                        // were the unlikely ones), so the rates learn only from rounds that verified the rule's depth,
+                        // as far as it; drafting every round is then the rates' doing and the chances pick the rows
+                        try e.rule.observeDepth(win.who(s), s.asked, @intCast(@min(chain_kept, s.asked)));
+                    }
                 }
                 var kept_branch: u64 = 0; // the context's graft rows kept, then Recall's
                 var kept_recall: u64 = 0;
@@ -395,6 +445,14 @@ pub const Engine = struct {
                 }
             }
             if (s.recall) |r| if (p.kind != .copy) r.noteHead(path.len); // its own rounds: the bar a copy must beat
+            {
+                // the reply's draft counts by depth (the done line): rows - 1 verified, path.len - 1 accepted
+                const last = s.depth_rounds.len - 1;
+                const d = @min(rows - 1, last);
+                s.depth_rounds[d] += 1;
+                s.depth_kept[d] += @intCast(path.len - 1);
+                s.kept_rounds[@min(path.len - 1, last)] += 1;
+            }
         }
         if (e.trim) |t| if (p.kind != .forced) {
             const chain = parents.len == 0 or accept.isChain(parents);
@@ -443,6 +501,10 @@ pub const Engine = struct {
     fn draftLate(e: *Engine, s: *Stream, start: u64, follow: []const u32, path: []const u32, budget: ?i64) !void {
         var w = win.who(s);
         const d: u32 = @intCast(try e.rule.headDepth(&w, budget, win.probe(e)));
+        if (budget == null) {
+            s.asked = d; // a lone round's draft: the rule's own depth
+            s.deepened = false;
+        }
         const request: be.DraftRequest = .{ .stream = s, .follow = follow, .rows = path, .start = start, .position = s.cache_len + 1, .depth = d };
         if (!e.late.put(e.backend.defer_lone_draft and e.alone, request)) try e.askDrafts(&.{request});
     }

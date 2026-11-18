@@ -4,8 +4,14 @@ const Allocator = std.mem.Allocator;
 const Table = @import("table.zig").Table;
 const alloc = @import("allocate.zig");
 const Constants = @import("depth.zig").Constants;
+const DraftPass = @import("depth.zig").DraftPass;
+pub const ContextCost = @import("depth.zig").ContextCost;
 
 pub const Cost = alloc.Cost;
+/// Model.shared_cut: a shared round's held drafts priced by the head's chances of this round (Backend.probabilities)
+/// in place of the stream's learned rates (`cut`); `deepen` also drafts every drafting stream's whole block, so the
+/// rows can go to a confident stream's deeper drafts as well as come off a doubtful one's.
+pub const SharedCut = enum { off, cut, deepen };
 
 /// The class default acceptance by depth (Python DraftDepth.depth_prior).
 pub const default_prior = [_]f64{ 0.85, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5 };
@@ -33,6 +39,10 @@ pub const Model = struct {
     drafts: u32 = 1, // head drafts a round at most
     window_costs: []const Cost = &.{}, // forward ms by exact window width (timed at load)
     window_costs_lone: bool = false, // window_costs price a lone stream only; shared forwards use shared_costs
+    context_costs: []const ContextCost = &.{}, // a lone round's prices by the stream's context (depth.zig ContextCost)
+    depth_from: u64 = 0, // context_costs: shared rounds price a stream's depth past this context (depth.zig Rule.depth_from)
+    depth_ab: bool = false, // context_costs: A/B tooling, new streams priced by context, by the table, plain in turn (Rule.ab_modes)
+    lone_cut: bool = false, // context_costs: a lone greedy stream at or below depth_from verifies only the held drafts that pay, by the head's chances (Backend.probabilities; depth.zig Rule.cut)
     shared_drafts: u32 = 0, // allocate_shared_drafts: a shared round's most head drafts a stream (0: drafts)
     mtp_step_ms: f64 = 0.0, // one chained head step (timed at load)
     shared_step_ms: ?f64 = null, // a separate shared head step; null keeps mtp_step_ms
@@ -46,6 +56,8 @@ pub const Model = struct {
     granted_depth: bool = false, // with draft_probabilities: every stream drafts its last grant plus a slack
     draft_slack: u32 = 0, // drafts past a stream's last grant, short or not (0: the Constants' own)
     draft_streams: bool = false, // the head drafts every stream of a shared round in one batch
+    draft_pass: ?DraftPass = null, // a shared round's drafter pass, priced: its streams draft only where it pays (depth.zig)
+    shared_cut: SharedCut = .off, // draft_pass: a shared round's rows by this round's chances of its greedy streams' drafts (windows.zig allocate)
     copy_first: bool = false, // a copy ahead takes the round: the head holds no drafts for it (a drafter's own pass)
     hold_costs: []const @import("hold_price.zig").HoldCost = &.{}, // a drafter's own hold pass, timed at load
     head_trees: bool = false, // the head drafts trees of lanes (DraftRequest.lanes) and holds them
@@ -84,6 +96,8 @@ pub const Config = struct {
     fill_match: u32 = 8, // context tokens a suffix-match branch must match (shorter ones are coincidental phrases)
     fill_floor: f64 = 0.35, // the share of grafted rows a stream must keep to go on reading its chain back every round
     draft_streams: bool,
+    draft_pass: ?DraftPass = null, // Model.draft_pass
+    shared_cut: SharedCut = .off, // Model.shared_cut (off without draft_pass, drafts or several streams)
     head_trees: bool,
     /// a prompt in pieces leaves its last token as the pending row of its first shared round's window
     join_tail: bool = false,
@@ -102,6 +116,10 @@ pub const Config = struct {
     shared_costs: Table,
     lane_costs: Table, // window ms by rows to 64 (lanes/plan_lanes.zig)
     mtp_step_ms: f64,
+    context_costs: []const ContextCost = &.{}, // Model.context_costs
+    depth_from: u64 = 0, // Model.depth_from
+    depth_ab: bool = false, // Model.depth_ab
+    lone_cut: bool = false, // Model.lone_cut
     draft_step_ms: f64 = 0, // Model.draft_step_ms
     shared_drafts: u32 = 0, // Model.shared_drafts
     lone_cost_tile: u32 = 0, // Model.lone_cost_tile
@@ -168,6 +186,8 @@ pub const Config = struct {
             .node_probabilities = m.draft_probabilities or m.draft_confidence != null,
             .granted_depth = m.granted_depth and m.draft_probabilities,
             .draft_streams = m.draft_streams,
+            .draft_pass = m.draft_pass,
+            .shared_cut = if (m.draft_pass != null and m.mtp and streams) m.shared_cut else .off,
             .head_trees = m.head_trees,
             .join_tail = m.join_tail,
             .piece_runs = m.piece_runs,
@@ -178,6 +198,10 @@ pub const Config = struct {
             .shared_costs = try alloc.extendCosts(gpa, timed.items, batch_rows),
             .lane_costs = try alloc.extendCosts(gpa, m.lane_costs, 64),
             .mtp_step_ms = m.mtp_step_ms,
+            .context_costs = m.context_costs,
+            .depth_from = m.depth_from,
+            .depth_ab = m.depth_ab and m.context_costs.len > 0,
+            .lone_cut = m.lone_cut and m.context_costs.len > 0,
             .k = .{
                 .shared_step_ms = m.shared_step_ms,
                 .depth_rate = if (m.depth_rate > 0) m.depth_rate else (Constants{}).depth_rate,

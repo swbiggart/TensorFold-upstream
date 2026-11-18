@@ -35,9 +35,11 @@ pub const Plan = struct {
     tried: bool = false, // the planner read the head's chain back to graft branches
     lanes: ?*const shape.Shape = null, // the held drafts' tree shape (each lane's depth and rank)
     masks: []const u32 = &.{}, // structured output: the rows' allowed-token bits (constrain)
+    late_masks: bool = false, // structured output: the backend masks the held chain's rows itself (Backend.late_masks)
     grammar_from: u32 = 0, // the first row the grammar drafted itself (0: none)
     recalled: bool = false, // the copy came from Recall's record
     graft_recalled: []const bool = &.{}, // each row from branch_from: a Recall candidate grafted it
+    chance_priced: bool = false, // shared_cut: the held chain was allocated by this round's chances (sharedChances)
 
     pub fn count(p: Plan) usize {
         return p.held + p.tokens.len;
@@ -90,6 +92,9 @@ pub fn plan(e: *Engine, s: *Stream, copied: ?Copy) !Plan {
                 }
             } else {
                 p.held = q.count;
+                // shared_cut: a block drafted past its budget (`deepen`) is verified past it only in a round that prices
+                // it by its chances; any other round (lone, 5 or more streams) sees the budget's prefix, as v0.2 drafted
+                if (s.deepened and !e.shared_open) p.held = @min(p.held, s.asked);
                 if (s.lanes) |*l| {
                     // a held tree is a lone stream's (shared rounds verify chains); a chain's lanes are observed too
                     if (q.parents) |parents| {
@@ -230,7 +235,7 @@ pub fn probe(e: *Engine) depth.Probe {
 }
 
 pub fn who(s: *Stream) depth.Who {
-    return .{ .state = &s.depth, .draft_room = s.draftRoom(), .finished = s.finished, .forced = s.force.items.len > 0, .granted = s.granted, .grant_short = s.grant_short, .gain = s.grant_gain, .stream = s, .sampled = s.sampling != null };
+    return .{ .state = &s.depth, .draft_room = s.draftRoom(), .finished = s.finished, .forced = s.force.items.len > 0, .granted = s.granted, .grant_short = s.grant_short, .gain = s.grant_gain, .stream = s, .sampled = s.sampling != null, .context = s.cache_len, .cut_arm = s.cut_arm };
 }
 
 /// Whether any of a round's streams draws keyed samples (its rows carry their host work).
@@ -245,7 +250,8 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
     const a = e.arena.allocator();
     const fixed = try a.alloc(u32, plans.len);
     const probs = try a.alloc([]const f64, plans.len);
-    for (plans, fixed, probs) |p, *fx, *pr| {
+    for (plans, fixed, probs) |*pp, *fx, *pr| {
+        const p = pp.*;
         const n = p.count();
         if (p.kind == .forced or n == 0) {
             fx.* = 1 + @as(u32, @intCast(if (p.kind == .forced) n else 0));
@@ -256,7 +262,16 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
             pr.* = try alloc.chainProbabilities(a, &.{rate}, n);
         } else {
             fx.* = 1;
-            const chances = try planChances(e, p, n);
+            const shared = try sharedChances(e, plans.len, p);
+            pp.chance_priced = shared != null;
+            // a deepened block without this round's chances (none read, past depth_from): its budget's prefix only
+            if (shared == null and p.stream.deepened and p.kind == .head and p.held > p.stream.asked and p.tokens.len == 0 and p.parents == null) {
+                try cut.prefix(a, pp, p.stream.asked);
+                fx.* = 1;
+                pr.* = if (pp.count() == 0) &.{} else try planChances(e, pp.*, pp.count());
+                continue;
+            }
+            const chances = shared orelse try planChances(e, p, n);
             const controls = @import("mtp_policy.zig").Controls{ .cap = e.cfg.most_drafts, .floor = e.cfg.draft_confidence };
             pr.* = if (p.kind == .head and e.cfg.draft_confidence != null) chances[0..controls.prefix(chances)] else chances;
         }
@@ -503,6 +518,40 @@ pub fn nodeChances(e: *Engine, s: *Stream, n: usize) ![]const f64 {
     return alloc.chainProbabilities(a, try e.rule.rates(who(s)), n);
 }
 
+/// shared_cut: in a round of several streams, a greedy stream's held chain without a grammar is priced by the head's
+/// chances of this round (Backend.probabilities: each draft's chance of landing with the drafts before it, which may run
+/// the deferred drafts first), so the allocation gives the rows to the drafts likeliest to land; null (the learned
+/// rates) when the round is not open to it (Engine.shared_open: 2 .. the pass's fair_above streams), when it is not
+/// such a stream, it is past depth_from (with context prices: its drafts' map and its rounds' prices
+/// there are the depth rule's), or the backend has none.
+fn sharedChances(e: *Engine, streams: usize, p: Plan) !?[]const f64 {
+    if (e.cfg.shared_cut == .off or !e.shared_open or streams < 2 or p.kind != .head or p.held == 0 or p.tokens.len > 0 or p.parents != null) return null;
+    const s = p.stream;
+    if (s.sampling != null or s.grammar != null) return null;
+    if (e.cfg.context_costs.len > 0 and s.cache_len > e.cfg.depth_from) return null; // the chances' map: shallow drafts
+    const hook = e.backend.vtable.probabilities orelse return null;
+    const out = try e.arena.allocator().alloc(f64, p.held);
+    if (!try hook(e.backend.ptr, s, out)) return null;
+    try trail.event(e, &.{ f("ev", trail.str("shared-chances")), f("stream", trail.str(s.id)), f("held", trail.int(p.held)) });
+    return out;
+}
+
+/// lone_cut: a lone greedy stream without a grammar, at or below depth_from, verifies the prefix of its held chain
+/// with the most expected tokens a ms (depth.zig Rule.cut) by the head's chances (Backend.probabilities, which may
+/// run the stream's draft first; false: none, the window stays whole). The drafts it verifies, or null when not cut.
+pub fn cutLone(e: *Engine, p: *Plan) !?usize {
+    const s = p.stream;
+    if (!e.cfg.lone_cut or !e.alone or p.kind != .head or p.held == 0 or p.tokens.len > 0 or p.parents != null) return null;
+    if (s.sampling != null or s.grammar != null or s.cache_len > e.cfg.depth_from) return null;
+    const hook = e.backend.vtable.probabilities orelse return null;
+    const chances = try e.arena.allocator().alloc(f64, p.held);
+    if (!try hook(e.backend.ptr, s, chances)) return null;
+    const keep = @max(1, @min(e.rule.cut(chances, s.cache_len), p.held));
+    try trail.event(e, &.{ f("ev", trail.str("cut")), f("stream", trail.str(s.id)), f("held", trail.int(p.held)), f("kept", trail.int(keep)) });
+    try cut.prefix(e.arena.allocator(), p, @intCast(keep));
+    return keep;
+}
+
 /// The grammar walk stays shared by serial windows and parallel per-stream jobs.
 pub const constrain = @import("grammar_window.zig").constrain;
 
@@ -514,7 +563,7 @@ pub fn build(e: *Engine, p: Plan, early: bool) !be.Window {
     const ds = try accept.depths(a, parents);
     const positions = try a.alloc(u64, rows);
     for (positions, ds) |*x, d| x.* = p.position + 1 + d;
-    return .{ .stream = p.stream, .pending = p.stream.pending.?, .held = p.held, .tokens = p.tokens, .parents = if (p.parents != null) parents else null, .positions = positions, .early = early, .masks = p.masks };
+    return .{ .stream = p.stream, .pending = p.stream.pending.?, .held = p.held, .tokens = p.tokens, .parents = if (p.parents != null) parents else null, .positions = positions, .early = early, .masks = p.masks, .late_masks = p.late_masks };
 }
 
 pub fn rowParents(e: *Engine, w: be.Window) ![]const i32 {

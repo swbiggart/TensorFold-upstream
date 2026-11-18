@@ -57,6 +57,8 @@ pub fn opened(e: *Engine, s: *Stream, reach: open.Reach, hook: ?be.Committed) !v
     };
     s.dropHeld(e.gpa);
     s.next = .{ .count = requests[0].heldDepth(e.backend) };
+    s.asked = requests[0].depth; // the first block's budget (shared_cut's feed rule reads it)
+    s.deepened = false;
     if (requests[0].heldDepth(e.backend) > 0) if (e.backend.vtable.tree) |tree| if (try tree(e.backend.ptr, s, e.gpa)) |held| {
         s.next = held;
     };

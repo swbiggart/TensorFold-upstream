@@ -86,9 +86,11 @@ test {
     _ = @import("lone_costs_test.zig");
     _ = @import("depth_floor_test.zig");
     _ = @import("lone_backoff_test.zig");
+    _ = @import("lone_cut_test.zig");
     _ = @import("fill_test.zig");
     _ = @import("fill_trim_test.zig");
     _ = @import("fair_turns_test.zig");
+    _ = @import("shared_cut_test.zig");
     _ = @import("copied_rate_test.zig");
     _ = @import("granted_reservation_test.zig");
     _ = @import("rollback_test.zig");

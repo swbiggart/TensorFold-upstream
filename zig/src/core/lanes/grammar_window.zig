@@ -59,8 +59,18 @@ pub fn apply(e: anytype, p: anytype, prepared: Prepared, w: grammar.Window) !voi
     }
     if (p.kind != .forced and w.rows.len == 1) p.kind = if (w.extra.len > 0) .grammar else .none;
 }
+/// Whether the plan's rows are masked by the backend after its verify made the drafts (Backend.late_masks): a grammar
+/// stream's chain of held drafts alone, nothing forced, copied or grafted.
+pub fn late(e: anytype, p: anytype) bool {
+    if (!e.backend.late_masks or p.stream.grammar == null) return false;
+    return p.held > 0 and p.tokens.len == 0 and p.parents == null and p.lanes == null and p.branch_from == 0 and p.kind == .head;
+}
 pub fn constrain(e: anytype, p: anytype) !void {
     if (p.stream.grammar == null) return;
+    if (late(e, p)) {
+        p.late_masks = true;
+        return;
+    }
     const prepared = try prepare(e, p);
     var profile: timing.Profile = .{ .clock = e.clock };
     defer timing.record(e, p.stream, profile);
