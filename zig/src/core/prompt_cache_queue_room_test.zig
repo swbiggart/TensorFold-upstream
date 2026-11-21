@@ -39,7 +39,7 @@ test "queued cache: endpoint has priority over a cheaper optional rewind with ex
     const primary = reserve.endpointFor(&s, &words, 12, 20, &.{}, &.{});
     try std.testing.expectEqual(@as(u32, 19), primary);
     const marks = try a.dupe(u32, &.{ 4, 19 });
-    const fitted = try reserve.fitting(&s, a, &words, marks, &.{}, s.entries.items[0], 20, primary);
+    const fitted = try reserve.fitting(&s, a, &words, marks, &.{}, s.entries.items[0], 20, primary, 0);
     defer a.free(fitted);
     try std.testing.expectEqualSlices(u32, &.{19}, fitted);
 }
@@ -60,7 +60,7 @@ test "queued cache: branched rewind and multiply borrowed restores cannot promis
         }
         defer e.borrowers = 0;
         s.reservation_guard = .{ .ctx = &f, .needed = idle };
-        const marks = try reserve.fitting(&s, a, &words, try a.dupe(u32, &.{16}), &.{}, e, 20, 16);
+        const marks = try reserve.fitting(&s, a, &words, try a.dupe(u32, &.{16}), &.{}, e, 20, 16, 0);
         defer a.free(marks);
         try std.testing.expectEqual(@as(usize, 0), marks.len);
         try std.testing.expectEqual(@as(u64, 1), s.counts.trimmed);
@@ -104,4 +104,30 @@ test "queued cache: begin reserves the warm lookahead endpoint after releasing i
     try std.testing.expectEqual(@as(u32, 12), plan.from);
     try std.testing.expectEqualSlices(u32, &.{19}, plan.marks);
     try std.testing.expectEqual(@as(u64, 0), s.held);
+}
+
+test "queued cache: shared_first plans a new shared prompt's end with the endpoint, evicting for both" {
+    for ([_]bool{ false, true }) |first| {
+        var f: Fake = .{ .gpa = a };
+        var s = pc.Store.init(a, f.snapshots(), .{ .min_prompt = 0, .min_gap = 1, .shared_first = first }, 330);
+        defer s.deinit();
+        const old1 = [_]u32{ 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62 };
+        const old2 = [_]u32{ 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82 };
+        _ = f.pass(&s, old1[0..10], .{});
+        try std.testing.expect(s.keep(&old1, 10, null, &.{}, &.{}));
+        _ = f.pass(&s, old2[0..12], .{});
+        try std.testing.expect(s.keep(&old2, 12, null, &.{}, &.{}));
+        try std.testing.expectEqual(@as(u64, 222), s.held);
+        s.reservation_guard = .{ .ctx = &f, .needed = idle };
+        const words = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20 };
+        const l = try s.lookupUser(a, &words, 20, 18, 0, 0, &.{8}, &.{}, &.{});
+        defer a.free(l.marks);
+        if (first) {
+            try std.testing.expectEqualSlices(u32, &.{ 8, 18 }, l.marks);
+            try std.testing.expectEqual(@as(usize, 0), s.entries.items.len); // both old states made room
+        } else {
+            try std.testing.expectEqualSlices(u32, &.{18}, l.marks); // the shared cut trimmed: no free room
+            try std.testing.expectEqual(@as(u64, 1), s.counts.trimmed);
+        }
+    }
 }

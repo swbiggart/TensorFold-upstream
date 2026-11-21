@@ -30,4 +30,7 @@ pub const Rules = struct {
     repeat_keyed: bool = false,
     /// Keep one before where the prompt parts from the one it resumed (a miss: the longest kept one), however near.
     fork: bool = false,
+    /// The longest shared cut a pass plans (a system block's end) is placed with the endpoint and may evict as it
+    /// does, so requests on a new shared prompt resume it (and wait for it) even when the store is full.
+    shared_first: bool = false,
 };
