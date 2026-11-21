@@ -19,6 +19,7 @@ const reads = [_]struct { root: []const u8, files: []const []const u8 }{
         "zig/src/families/deepseek_v41/fixtures/serve/template.jsonl",
     } },
     .{ .root = "zig/src/families/lfm2/lfm2.zig", .files = &.{"zig/tests/fixtures/lfm2/images.json"} },
+    .{ .root = "zig/src/families/inkling2/image_test.zig", .files = &.{ "zig/tests/fixtures/inkling2/images.json", "zig/tests/fixtures/picture/edges.json" } },
 };
 
 pub fn wire(b: *std.Build) void {

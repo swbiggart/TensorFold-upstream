@@ -15,7 +15,7 @@ pub fn option(b: *std.Build) ?[]const u8 {
 pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, dir: ?[]const u8, lanes: *std.Build.Module) void {
     const step = b.step("grammar", "libtfgrammar (structured output) from an xgrammar " ++ pinned ++ " checkout: -Dxgrammar=DIR");
     const budget = b.step("test-grammar-budget", "grammar_budget's masks against brute force through a real libtfgrammar: -Dxgrammar=DIR");
-    const tools = b.step("test-grammar-tools", "tool_grammar's call grammars walked through a real libtfgrammar: -Dxgrammar=DIR");
+    const tools = b.step("test-grammar-tools", "tool_grammar's and Inkling 2's call grammars walked through a real libtfgrammar: -Dxgrammar=DIR");
     const root = dir orelse {
         step.dependOn(&b.addFail("zig build grammar needs -Dxgrammar=DIR: " ++ clone).step);
         budget.dependOn(&b.addFail("zig build test-grammar-budget needs -Dxgrammar=DIR: " ++ clone).step);

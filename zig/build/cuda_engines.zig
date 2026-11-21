@@ -66,6 +66,7 @@ pub fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     const api = qwen35.import_table.get("engine_api").?; // family()'s, so the server and qwen3_5 share one
     const canon = canonModule(b, target, optimize);
     const verbs = @import("tp.zig").verbsModule(b, target, optimize);
+    const ink_host = @import("inkling2.zig").module(b, target, optimize);
     const mod = b.createModule(.{
         .root_source_file = b.path("zig/src/native/cuda.zig"),
         .target = target,
@@ -83,6 +84,8 @@ pub fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
             .{ .name = "glm_cuda", .module = glmCudaShared(b, target, optimize, cuda, core, lanes, heat, api, canon, verbs) },
             .{ .name = "qwen3_cuda", .module = qwen3Module(b, target, optimize, cuda, core, lanes, api) },
             .{ .name = "minimax_m3_cuda", .module = @import("minimax_cuda.zig").module(b, target, optimize, cuda, core, lanes) },
+            .{ .name = "inkling2", .module = ink_host },
+            .{ .name = "inkling2_serve", .module = @import("inkling2.zig").serveModule(b, target, optimize, cuda, lanes, ink_host, core) },
             .{ .name = "qwen35", .module = qwen35 },
             .{ .name = "kolibri1", .module = @import("kolibri.zig").module(b, target, optimize, cuda, core, lanes) },
             .{ .name = "gemma4_cuda", .module = @import("gemma4_cuda.zig").module(b, target, optimize, cuda, core, lanes) },
