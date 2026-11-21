@@ -13,7 +13,11 @@ pub fn offer(v: anytype, open: ?api.VisionOpen) ?api.Vision {
         fn f(ctx: *anyopaque, a: Allocator, bytes: []const u8, max_tokens: u32) anyerror!api.PreparedImage {
             const t: *T = @ptrCast(@alignCast(ctx));
             const p = try t.prepare(a, bytes, max_tokens);
-            return .{ .pixels = p.pixels, .gh = p.gh, .gw = p.gw, .tokens = p.tokens, .hash = p.hash };
+            var out: api.PreparedImage = .{ .pixels = p.pixels, .gh = p.gh, .gw = p.gw, .tokens = p.tokens, .hash = p.hash };
+            // a family that names an image's visible size or full digest passes them on (Inkling-2's)
+            if (comptime @hasField(@TypeOf(p), "content_size")) out.content_size = p.content_size;
+            if (comptime @hasField(@TypeOf(p), "digest")) out.digest = p.digest;
+            return out;
         }
     }.f;
     if (comptime T == qwen35.native.vision.Vision) {
@@ -237,4 +241,41 @@ test "actual Qwen offer keeps its image_url type and template-owned markers" {
     try std.testing.expectEqual(@as(u32, 57), held.image_token);
     try std.testing.expectEqualSlices(u32, &q.markers, held.markers);
     try std.testing.expect(held.wrap == null and held.video == null);
+}
+
+test "inkling2 on CUDA: the image offer gives the server the RGB record, its size, digest and grid, and refusals with their numbers" {
+    const offer_mod = @import("inkling2_serve").image_offer;
+    const image = offer_mod.image;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var v = offer_mod.Vision.init(std.testing.io, std.testing.allocator, 200054, .{});
+    const x = offer(@as(?*offer_mod.Vision, &v), null).?;
+    try std.testing.expectEqual(@as(u32, 200054), x.image_token);
+    try std.testing.expectEqualSlices(u32, &.{ 200005, 200054, 200010 }, x.markers);
+    try std.testing.expectEqual(@as(?[2]u32, null), x.wrap); // the template writes its own markers
+    try std.testing.expectEqual(@as(u32, 10_816), x.image_tokens);
+    // a 17 x 9 PNG with clear alpha (fixtures/inkling2/images.json png_rgba_clear_17x9): one token, the checkerboard
+    const png = "iVBORw0KGgoAAAANSUhEUgAAABEAAAAJCAYAAADU6McMAAABT0lEQVR4nC3SPUjVYRTH8c+Ni9xMu0fFQSgTIxIXCZoabNAQAgkaegEhcJUmt6KXQa3IphoKEl2iQR2C1EWQwiIaDBKiIdJFFLkEUcHlIhL/v89ZHjgcvud7fjwFqso+C3tCk7AqPBDWhS5hU/gpHBN6he/Cc+GQMCXUFJ34i1m8wwusoA6bKKMZ93ANDXiCkfR+RUFRRzcy0AQO46ODOodOFPEFC+jBJfzAIM7ifAZ5hNt4jBYM4zWaMINb+J2296If9biQQG8yyC5OYQ1tGEo27fmWg3qG0WR1H/9wJPW6M8g+dnAVZ9JQCeO4iJuYTyaT2EMt9bbwKYMsYiAFW0VrOukuGnEyab/N1bmDX3ifh8ofBRvLyi4LK0JFKAkPhVfChnBamBPWhG/CuDAhtAnX8+9Q1PESSziOMfRhO+UznevyFFeS4Q0cRSWd+8F/F95Oh7xm2WAAAAAASUVORK5CYII=";
+    const bytes = try a.alloc(u8, try std.base64.standard.Decoder.calcSizeForSlice(png));
+    try std.base64.standard.Decoder.decode(bytes, png);
+    const p = try x.prepare(x.ctx, a, bytes, 10_816);
+    try std.testing.expectEqual(@as(u32, 1), p.tokens);
+    try std.testing.expectEqual(@as(u32, 1), p.gh);
+    try std.testing.expectEqual(@as(?[2]u32, .{ 9, 17 }), p.content_size);
+    const r = try image.record(.{ .pixels = p.pixels, .gh = p.gh, .gw = p.gw, .tokens = p.tokens });
+    var h: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(r.rgb, &h, .{});
+    try std.testing.expectEqualStrings("ed09ac3a10d6174370d6d363de943d8ef87cc24d60202670718667e583b74937", &std.fmt.bytesToHex(h, .lower));
+    try std.testing.expectEqualSlices(u8, &r.rec.digest, &p.digest);
+    try std.testing.expectEqualSlices(u8, &image.digest(9, 17, r.rgb), &p.digest);
+    try std.testing.expect(p.hash != 0 and p.hash < 1 << 62);
+    // above the side limit: refused from the header, worded with the numbers through explain
+    const big = "\x89\x50\x4e\x47\x0d\x0a\x1a\x0a\x00\x00\x00\x0d\x49\x48\x44\x52\x00\x00\x13\x88\x00\x00\x00\x14\x08\x02\x00\x00\x00\xee\x68\x40\xf7\x00\x00\x00\x07\x49\x44\x41\x54\x67\x61\x72\x62\x61\x67\x65\x88\xa3\x30\x37\x00\x00\x00\x00\x49\x45\x4e\x44\xae\x42\x60\x82";
+    const err = if (x.prepare(x.ctx, a, big, 10_816)) |_| error.TestUnexpectedResult else |e| e;
+    try std.testing.expectEqualStrings("it is 5000 x 20 pixels; at most 4096 pixels a side are accepted (send a smaller image)", x.explain.?(err).?);
+    // over this image's share of the request's tokens: 2000 x 20 is 50 tokens, with 49 allowed
+    const wide = "\x89\x50\x4e\x47\x0d\x0a\x1a\x0a\x00\x00\x00\x0d\x49\x48\x44\x52\x00\x00\x07\xd0\x00\x00\x00\x14\x08\x02\x00\x00\x00\x5a\x84\x31\x02\x00\x00\x00\x07\x49\x44\x41\x54\x67\x61\x72\x62\x61\x67\x65\x88\xa3\x30\x37\x00\x00\x00\x00\x49\x45\x4e\x44\xae\x42\x60\x82";
+    const err2 = if (x.prepare(x.ctx, a, wide, 49)) |_| error.TestUnexpectedResult else |e| e;
+    try std.testing.expectEqualStrings("2000 x 20 pixels is 50 image tokens (1 x 50 blocks of 40 pixels); this request allows 49 an image (10816 a request, shared evenly by its images)", x.explain.?(err2).?);
 }

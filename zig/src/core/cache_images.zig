@@ -5,10 +5,12 @@ const modes = @import("cache_modes.zig");
 const Image = @import("lanes").stream.Image;
 const Allocator = std.mem.Allocator;
 
-pub const Identity = struct { at: u32, tokens: u32, gh: u32, gw: u32, hash: u64 };
+/// `digest`: a family's full 256-bit identity of the image (zeros when it names none): a 62-bit `hash` collision then
+/// cannot resume another image's state.
+pub const Identity = struct { at: u32, tokens: u32, gh: u32, gw: u32, hash: u64, digest: [32]u8 = @splat(0) };
 
 fn identity(i: Image) Identity {
-    return .{ .at = i.at, .tokens = i.tokens, .gh = i.gh, .gw = i.gw, .hash = i.hash };
+    return .{ .at = i.at, .tokens = i.tokens, .gh = i.gh, .gw = i.gw, .hash = i.hash, .digest = i.digest };
 }
 
 /// Include the image when its first row enters the keyed prefix, including any required lookahead.
@@ -94,6 +96,10 @@ test "image prefix identity includes geometry, keeps text prefixes and ignores f
     changed = original;
     changed.at += 2;
     try t.expect(equal(kept, &.{ original, changed }, 5));
+    // the same 62-bit hash with another full digest is another image
+    changed = original;
+    changed.digest[31] = 1;
+    try t.expect(!equal(kept, &.{changed}, 5));
     try t.expect(!diskSafe(&.{ 1, 0x8000_0000, 2 }));
     try t.expect(diskSafe(&.{ 1, 2, 3 }));
 }

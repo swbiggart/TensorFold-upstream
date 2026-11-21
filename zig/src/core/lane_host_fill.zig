@@ -169,9 +169,13 @@ pub fn run(h: *LaneHost) void {
             burst += 1;
         }
         const counted = budget > 0 and runnable(h) > 0; // a stream that opened earlier in this visit waits from here
+        const job = h.filling.items[at];
+        const decoding = runnable(h) > 0;
         const rows = step(h, at);
         if (counted) used +|= rows;
+        const side = sided(h, job, decoding);
         between(h);
+        if (side) return; // a side unit took the visit's prompt time: the decoders' round comes first
     }
     if (first != null or (budget > 0 and used >= budget)) return; // one long step a visit at most, as before
     const at = pick(h, .long) orelse return;
@@ -187,8 +191,12 @@ fn policyRun(h: *LaneHost) void {
             if (burst == h.info_.lanes and (runnable(h) > 0 or pick(h, .long) != null)) break;
             burst += 1;
         }
+        const job = h.filling.items[at];
+        const decoding = runnable(h) > 0;
         _ = step(h, at);
+        const side = sided(h, job, decoding);
         between(h);
+        if (side) return; // as in `run`
     }
     if (!due(h)) return; // TENSORFOLD_PREFILL_SHARE's debt, per visit
     const at = oldestLong(h) orelse return;
@@ -210,6 +218,20 @@ fn agedLong(h: *const LaneHost) ?usize {
     return if (h.filling.items[at].fill_wait >= preference_rounds) at else null;
 }
 
+/// A short prompt's call that ran side work instead of its rows (Stream.side_ns: an image's tower unit, which a capped
+/// call runs one of beside decoders, its own or another prompt's): its time is owed to decoders as a long prompt's step
+/// is, and true: their round goes before any other prompt call. Its later calls are long ones (`short`) until a call
+/// fills rows. Text prompts never set side_ns: false, and nothing changes. While decode time is owed no call runs a
+/// capped unit at all (Stream.side_held, set in `fillAt`), so a second short prompt cannot spend the same debt again.
+fn sided(h: *LaneHost, job: *const LaneHost.Job, decoding: bool) bool {
+    for (h.filling.items) |j| if (j == job) {
+        if (j.stream.side_ns == 0) return false;
+        h.share.stepped(@intCast(@min(j.stream.side_ns, std.math.maxInt(i64))), decoding);
+        return true;
+    };
+    return false;
+}
+
 /// Between two prompt calls: cancels, then queued requests into free lanes.
 fn between(h: *LaneHost) void {
     @import("lane_host_end.zig").takeCancels(h);
@@ -224,6 +246,11 @@ fn fillAt(h: *LaneHost, at: usize) void {
     var line: lane_trace.Event = if (h.trace) |t| .fill(t, job.id, job.seq, if (first) job.stream.cached else job.stream.fill_at.load(.monotonic)) else undefined;
     defer if (h.trace) |t| t.end(&line);
     job.fill_began = true;
+    job.stream.side_ns = 0; // the backend sets it again if this call runs side work
+    // side work waits while decode time is owed, whoever's step owes it: a long step's, or a unit another short
+    // prompt ran (`sided`). A backend that would run a capped unit runs nothing and sets side_wait (`short`)
+    job.stream.side_held = !due(h);
+    job.stream.side_wait = false;
     load.calling(h, job);
     const done = h.core.fillStreamCommitted(&job.stream, first, .{ .ptr = job, .call = LaneHost.firstCommitted }, capRows(h)) catch |e| {
         if (h.trace != null) line.failed(job.stream.fill_at.load(.monotonic));
@@ -293,9 +320,11 @@ fn srptStep(h: *LaneHost, at: usize, decoding: bool) u64 {
     return rows;
 }
 
-/// A prompt whose whole pass is at most `short_rows` rows (a long prompt's last rows are not).
+/// A prompt whose whole pass is at most `short_rows` rows (a long prompt's last rows are not), and whose last call
+/// filled rows: one that ran side work (`sided`), or held it (Stream.side_wait: a fresh image prompt's call while
+/// decode time was owed), waits on the decoders' share as a long prompt's step does. Text prompts never set either.
 fn short(j: *const LaneHost.Job) bool {
-    return j.stream.prompt_len -| j.stream.cached <= Share.short_rows;
+    return j.stream.side_ns == 0 and !j.stream.side_wait and j.stream.prompt_len -| j.stream.cached <= Share.short_rows;
 }
 
 /// Fill chunks' cap: only the flag, a chunk-invariant family and live decoders together; else 0 (the engine's own cut).

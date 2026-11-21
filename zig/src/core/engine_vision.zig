@@ -11,6 +11,8 @@ pub const PreparedImage = struct {
     /// Visible pixel height and width before padding, for towers with content-normalized positions.
     content_size: ?[2]u32 = null,
     hash: u64,
+    /// The image's full identity (a family's SHA-256 of its decoded pixels); zeros: the family names none, `hash` alone.
+    digest: [32]u8 = @splat(0),
     /// The image as tower inputs in order, each image tokens between `before` and `after`; empty: `pixels` alone.
     pieces: []const Piece = &.{},
 };

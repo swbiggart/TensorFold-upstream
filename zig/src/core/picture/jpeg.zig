@@ -19,7 +19,8 @@ pub const wrong_version = needs ++ "; the library has another release, whose pix
 
 const library = if (builtin.os.tag == .macos) "libturbojpeg.0.dylib" else if (builtin.os.tag == .windows) "turbojpeg.dll" else "libturbojpeg.so.0";
 
-// TurboJPEG 3's enums: an init type, pixel formats, parameters and error codes
+// TurboJPEG 3's enums: an init type, pixel formats, parameters and error codes (3.1.4.1's turbojpeg.h: enum TJPARAM
+// counts from 0, TJPARAM_MAXMEMORY is its 24th entry and TJPARAM_SAVEMARKERS its 26th)
 const init_decompress = 1;
 const pf_rgb = 0;
 const pf_gray = 6;
@@ -29,7 +30,13 @@ const param_height = 6;
 const param_precision = 7;
 const param_fast_upsample = 9;
 const param_fast_dct = 10;
+const param_max_memory = 23;
+const param_save_markers = 25;
 const err_warning = 0;
+
+/// libjpeg's words when a decode needs more than TJPARAM_MAXMEMORY (jerror.h JERR_NO_BACKING_STORE: jmemnobs.c has no
+/// backing store, so the whole-image buffer that does not fit is refused).
+const memory_limit_exceeded = "Memory limit exceeded";
 
 const Fns = struct {
     tj3Init: *const fn (c_int) callconv(.c) ?*anyopaque,
@@ -39,6 +46,7 @@ const Fns = struct {
     tj3DecompressHeader: *const fn (?*anyopaque, [*]const u8, usize) callconv(.c) c_int,
     tj3Decompress8: *const fn (?*anyopaque, [*]const u8, usize, [*]u8, c_int, c_int) callconv(.c) c_int,
     tj3GetErrorCode: *const fn (?*anyopaque) callconv(.c) c_int,
+    tj3GetErrorStr: *const fn (?*anyopaque) callconv(.c) [*:0]const u8,
 };
 
 const Loaded = union(enum) { unknown, missing, wrong, ready: Fns };
@@ -163,6 +171,14 @@ pub fn decodeWithLimits(io: std.Io, a: Allocator, data: []const u8, limits: pict
     for ([_][2]c_int{ .{ param_fast_dct, 0 }, .{ param_fast_upsample, 0 }, .{ param_stop_on_warning, 0 } }) |p| {
         if (f.tj3Set(h, p[0], p[1]) != 0) return error.Invalid;
     }
+    // a caller's memory cap: the decoder's working memory past it is refused, and no marker is kept (TurboJPEG's
+    // default keeps every APP2 segment, which would count against the cap; the pixels do not use them)
+    if (limits.jpeg_memory_mib > 0) {
+        const mib = std.math.cast(c_int, limits.jpeg_memory_mib) orelse return error.Invalid;
+        for ([_][2]c_int{ .{ param_max_memory, mib }, .{ param_save_markers, 0 } }) |p| {
+            if (f.tj3Set(h, p[0], p[1]) != 0) return error.Invalid;
+        }
+    }
     if (f.tj3DecompressHeader(h, data.ptr, data.len) != 0 and f.tj3GetErrorCode(h) != err_warning) return error.Invalid;
     const same = f.tj3Get(h, param_width) == m.width and f.tj3Get(h, param_height) == m.height;
     if (!same or f.tj3Get(h, param_precision) != 8) return error.Invalid;
@@ -175,6 +191,8 @@ pub fn decodeWithLimits(io: std.Io, a: Allocator, data: []const u8, limits: pict
     const out = rgb[0 .. w * ht * @as(usize, if (gray) 1 else 3)];
     @memset(out, 0x00);
     if (f.tj3Decompress8(h, data.ptr, data.len, out.ptr, 0, pf) != 0) {
+        // by name first: after an earlier warning TurboJPEG reports even this error as a warning
+        if (overMemory(f, h)) return error.JpegDecoderMemory;
         if (f.tj3GetErrorCode(h) != err_warning) return error.Invalid;
         try wroteAll(f, h, a, data, out, pf);
     }
@@ -195,8 +213,16 @@ fn wroteAll(f: Fns, h: ?*anyopaque, a: Allocator, data: []const u8, out: []const
     const again = try a.alloc(u8, out.len);
     defer a.free(again);
     @memset(again, 0xFF);
-    if (f.tj3Decompress8(h, data.ptr, data.len, again.ptr, 0, pf) != 0 and f.tj3GetErrorCode(h) != err_warning) return error.Invalid;
+    if (f.tj3Decompress8(h, data.ptr, data.len, again.ptr, 0, pf) != 0) {
+        if (overMemory(f, h)) return error.JpegDecoderMemory;
+        if (f.tj3GetErrorCode(h) != err_warning) return error.Invalid;
+    }
     if (!std.mem.eql(u8, out, again)) return error.Invalid;
+}
+
+/// Whether the decode that just failed ran past TJPARAM_MAXMEMORY.
+fn overMemory(f: Fns, h: ?*anyopaque) bool {
+    return std.mem.eql(u8, std.mem.span(f.tj3GetErrorStr(h)), memory_limit_exceeded);
 }
 
 /// Pillow's open: markers up to the first scan (EXIF, XMP, JFIF density, the frame), then on to the end marker.
@@ -289,7 +315,7 @@ fn reachesEnd(data: []const u8, from: usize) bool {
             0x01, 0xD0...0xD8 => at += 2,
             else => {
                 if (data.len - at < 4) return false;
-                at += 2 + std.mem.readInt(u16, data[at + 2 ..][0..2], .big);
+                at += 2 + @as(usize, std.mem.readInt(u16, data[at + 2 ..][0..2], .big)); // past u16 at 65,534
             },
         }
     }

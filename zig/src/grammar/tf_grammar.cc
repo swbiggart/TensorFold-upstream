@@ -8,6 +8,7 @@
 #include <cstring>
 #include <exception>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -58,12 +59,22 @@ std::shared_ptr<const Spellings> spellings(const xgrammar::TokenizerInfo& info) 
     return out;
 }
 
+// Compiled grammars by kind and text, up to CACHE_BYTES. xgrammar's own cache is off: v0.2.8's rule-level cache keys a
+// rule by its FSM's shape, and a token edge hashes its slot, not its token ids, so two grammars that differ only in a
+// token (Token(...), structural tags' token / exclude_token / any_tokens) share one rule's masks.
+struct Grammars {
+    std::mutex mu;
+    std::unordered_map<std::string, xgrammar::CompiledGrammar> by_text;
+    int64_t bytes = 0;
+};
+
 struct Compiler {
     xgrammar::TokenizerInfo info;
     xgrammar::GrammarCompiler compiler;
     int vocab;
     std::shared_ptr<const Spellings> spell;
     tfb::Cache budgets;
+    std::unique_ptr<Grammars> cache = std::make_unique<Grammars>();
 };
 
 struct Compiled {
@@ -124,7 +135,7 @@ void* tfg_open(const char* tokenizer_json, size_t len, int vocab, const int32_t*
         bool prefix = mo2.at("add_prefix_space").get<bool>();
         std::vector<int32_t> stop(stops, stops + nstops);
         xgrammar::TokenizerInfo info(encoded, type, vocab, stop, prefix);
-        return new Compiler{info, xgrammar::GrammarCompiler(info, 8, true, CACHE_BYTES), vocab, spellings(info), tfb::Cache(info)};
+        return new Compiler{info, xgrammar::GrammarCompiler(info, 8, false), vocab, spellings(info), tfb::Cache(info)};
     } catch (const std::exception& e) {
         message(err, errlen, e.what());
     } catch (...) {
@@ -143,6 +154,12 @@ void* tfg_compile(void* cp, int kind, const char* text, size_t len, char* err, s
     auto* c = static_cast<Compiler*>(cp);
     try {
         std::string t(text, len);
+        std::string key = std::to_string(kind) + '\n' + t;
+        {
+            std::lock_guard<std::mutex> lock(c->cache->mu);
+            auto hit = c->cache->by_text.find(key);
+            if (hit != c->cache->by_text.end()) return new Compiled{hit->second, c->spell, c};
+        }
         xgrammar::CompiledGrammar g = [&] {
             switch (kind) {
                 case 0: return c->compiler.CompileJSONSchema(OBJECT, true, std::nullopt, std::nullopt, true, BLANKS);
@@ -165,6 +182,12 @@ void* tfg_compile(void* cp, int kind, const char* text, size_t len, char* err, s
                 default: return c->compiler.CompileGrammar(t);
             }
         }();
+        {
+            std::lock_guard<std::mutex> lock(c->cache->mu);
+            int64_t size = (int64_t)g.MemorySizeBytes() + (int64_t)key.size();
+            if (c->cache->bytes + size > CACHE_BYTES) c->cache->by_text.clear(), c->cache->bytes = 0;
+            if (size <= CACHE_BYTES && c->cache->by_text.emplace(key, g).second) c->cache->bytes += size;
+        }
         return new Compiled{g, c->spell, c};
     } catch (const std::exception& e) {
         message(err, errlen, e.what());

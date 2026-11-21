@@ -29,6 +29,10 @@ const Info = struct {
     frames: ?u32 = null, // acTL's frame count while it is valid
     frame_box: bool = false, // an fcTL came before the image data
     text: usize = 0,
+    /// Every compressed text chunk inflates through one window into one buffer, both made at the first (the memory a
+    /// decode's text takes stays bounded); what is refused is Pillow's rule alone (`text`).
+    window: ?[]u8 = null,
+    out: ?[]u8 = null,
 };
 
 const Chunk = struct { kind: *const [4]u8, body: []const u8, next: usize };
@@ -158,7 +162,8 @@ fn trailer(arena: Allocator, info: *Info, c: Chunk) picture.Error!void {
     } else if (std.mem.eql(u8, k, "zTXt")) {
         const key, const rest = splitKey(b);
         if (rest.len > 0 and rest[0] != 0) return error.Invalid; // an unknown compression method
-        const value = (try inflate(arena, if (rest.len > 0) rest[1..] else rest)) orelse "";
+        const raw = (try inflate(arena, info, if (rest.len > 0) rest[1..] else rest)) orelse "";
+        const value = if (kept(key)) try arena.dupe(u8, raw) else raw; // the buffer is the next chunk's
         if (key.len > 0) try text(info, key, value, value.len, true);
     } else if (std.mem.eql(u8, k, "iTXt")) {
         const key = b[0 .. std.mem.indexOfScalar(u8, b, 0) orelse return];
@@ -169,7 +174,8 @@ fn trailer(arena: Allocator, info: *Info, c: Chunk) picture.Error!void {
         var value = r[2..][tk_end + 1 ..];
         if (r[0] != 0) {
             if (r[1] != 0) return;
-            value = (try inflate(arena, value)) orelse return;
+            const raw = (try inflate(arena, info, value)) orelse return;
+            value = if (kept(key)) try arena.dupe(u8, raw) else raw; // the buffer is the next chunk's
         }
         if (std.mem.eql(u8, key, "XML:com.adobe.xmp")) info.xmp = value;
         if (!std.unicode.utf8ValidateSlice(r[2..][0..lang_end]) or !std.unicode.utf8ValidateSlice(r[2..][lang_end + 1 .. tk_end])) return;
@@ -198,16 +204,32 @@ fn text(info: *Info, key: []const u8, value: []const u8, chars: usize, decoded: 
     if (info.text > text_most) return error.Invalid;
 }
 
-/// A zlib text body; null when it does not inflate (Pillow kept no text), error.Invalid past 1 MiB.
-fn inflate(arena: Allocator, body: []const u8) picture.Error!?[]const u8 {
-    var in: std.Io.Reader = .fixed(body);
-    const window = try arena.alloc(u8, std.compress.flate.max_window_len);
-    var z: std.compress.flate.Decompress = .init(&in, .zlib, window);
-    return z.reader.allocRemaining(arena, .limited(text_chunk_most)) catch |err| switch (err) {
-        error.StreamTooLong => error.Invalid,
-        error.OutOfMemory => error.OutOfMemory,
-        else => null,
+/// The keywords whose values outlive their chunk (the orientation is read from them).
+fn kept(key: []const u8) bool {
+    return std.mem.eql(u8, key, "exif") or std.mem.eql(u8, key, "Raw profile type exif") or std.mem.eql(u8, key, "XML:com.adobe.xmp");
+}
+
+/// A zlib text body in `info`'s one buffer (valid until the next call); null when it does not inflate (Pillow kept no
+/// text), error.Invalid past 1 MiB (Pillow's chunk bound). Memory stays one window and one buffer whatever the chunks
+/// are; text Pillow discards (it does not decode) inflates without counting toward the 64 MiB bound, as in Pillow, so
+/// its work is bounded only by the file (deflate gives at most about 1,032 bytes a compressed byte).
+fn inflate(arena: Allocator, info: *Info, body: []const u8) picture.Error!?[]const u8 {
+    const window = info.window orelse blk: {
+        info.window = try arena.alloc(u8, std.compress.flate.max_window_len);
+        break :blk info.window.?;
     };
+    const out = info.out orelse blk: {
+        info.out = try arena.alloc(u8, text_chunk_most);
+        break :blk info.out.?;
+    };
+    var in: std.Io.Reader = .fixed(body);
+    var z: std.compress.flate.Decompress = .init(&in, .zlib, window);
+    var w: std.Io.Writer = .fixed(out);
+    const n = z.reader.streamRemaining(&w) catch |err| switch (err) {
+        error.WriteFailed => return error.Invalid, // past 1 MiB
+        error.ReadFailed => return null,
+    };
+    return out[0..n];
 }
 
 /// "Raw profile type exif": hex after the first three lines, whitespace ignored, as bytes.fromhex read it.

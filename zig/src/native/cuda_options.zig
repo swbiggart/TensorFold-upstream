@@ -10,6 +10,8 @@ pub fn set(comptime F: type, o: api.Open, opts: *F.Options, problem: *[]const u8
     if (@hasField(F.Options, "lanes")) opts.lanes = o.lanes;
     if (@hasField(F.Options, "lanes_fixed")) opts.lanes_fixed = o.lanes_fixed;
     if (@hasField(F.Options, "one_stream")) opts.one_stream = o.lanes == 1;
+    // a family that counts its own streams from every rank's room (Inkling-2): what --parallel and the cache ask
+    if (@hasField(F.Options, "streams_asked")) opts.streams_asked = .{ .n = o.lanes, .fixed = o.lanes_fixed, .cache_gib = o.prompt_cache_gib };
     if (@hasField(F.Options, "rank")) {
         opts.tp = @intCast(o.tp);
         opts.rank = @intCast(o.rank);

@@ -12,7 +12,7 @@ pub const identity = @import("identity.zig");
 pub const patches = @import("patches.zig");
 pub const normalize = @import("normalize.zig");
 
-pub const Error = error{ Invalid, Oversized, Animated, CmykJpeg, NoJpegLibrary, JpegLibraryVersion, NoWebpLibrary, WebpLibraryVersion, OutOfMemory };
+pub const Error = error{ Invalid, Oversized, Animated, CmykJpeg, JpegDecoderMemory, NoJpegLibrary, JpegLibraryVersion, NoWebpLibrary, WebpLibraryVersion, OutOfMemory };
 
 /// 0.6.6's ImageLimits for one picture.
 pub const max_side = 8192;
@@ -30,12 +30,26 @@ pub fn fits(width: u64, height: u64) error{ Invalid, Oversized }!void {
 pub const Limits = struct {
     side: u64 = max_side,
     pixels: u64 = max_pixels,
+    /// A token budget: at most `tokens` blocks of `block` x `block` pixels, padded up (0: none). Checked with the
+    /// size, on the size the codec decodes (not a first header a later one replaces), before any pixel is allocated.
+    tokens: u64 = 0,
+    block: u64 = 0,
+    /// When set, the width and height the codec judged, written before the check (for a refusal that names them).
+    seen: ?*[2]u64 = null,
+    /// libjpeg-turbo's working memory for one JPEG in MiB (TJPARAM_MAXMEMORY: a progressive or multi-scan JPEG's
+    /// whole-image coefficient buffer), refused past it as error.JpegDecoderMemory; 0: no cap (the library's default).
+    jpeg_memory_mib: u32 = 0,
 
     pub fn fits(limits: Limits, width: u64, height: u64) error{ Invalid, Oversized }!void {
+        if (limits.seen) |s| s.* = .{ width, height };
         if (limits.side == 0 or limits.pixels == 0 or width == 0 or height == 0) return error.Invalid;
         const count = std.math.mul(u64, width, height) catch return error.Invalid;
         if (count > bomb_pixels) return error.Invalid;
         if (@max(width, height) > limits.side or count > limits.pixels) return error.Oversized;
+        if (limits.tokens > 0 and limits.block > 0) { // width and height are at least 1 here: no overflow for any block
+            const blocks = std.math.mul(u64, (width - 1) / limits.block + 1, (height - 1) / limits.block + 1) catch return error.Oversized;
+            if (blocks > limits.tokens) return error.Oversized;
+        }
     }
 };
 
@@ -92,6 +106,7 @@ pub fn problem(err: Error) []const u8 {
         error.Oversized => "image dimensions exceed the decoded pixel limit",
         error.Animated => "animated and multipage images are unsupported; send a single frame",
         error.CmykJpeg => cmyk,
+        error.JpegDecoderMemory => "the JPEG needs more decoder memory than this server allows; send a baseline JPEG or a PNG",
         error.NoJpegLibrary => jpeg.missing,
         error.JpegLibraryVersion => jpeg.wrong_version,
         error.NoWebpLibrary => webp.missing,

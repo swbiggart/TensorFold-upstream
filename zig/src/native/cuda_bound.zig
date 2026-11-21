@@ -147,7 +147,54 @@ pub fn vtable(comptime H: type, v: be.Backend.VTable) be.Backend.VTable {
                 x.inner.vtable.release(x.inner.ptr, s);
             }
         }.f,
+        .idle_pending = if (v.idle_pending != null) struct {
+            fn f(p: *anyopaque) bool {
+                const x = H.bind(p);
+                return x.inner.vtable.idle_pending.?(x.inner.ptr);
+            }
+        }.f else null,
+        .idle = if (v.idle != null) struct {
+            fn f(p: *anyopaque) void {
+                const x = H.bind(p);
+                x.inner.vtable.idle.?(x.inner.ptr);
+            }
+        }.f else null,
     };
+}
+
+test "a family's idle work (pending, a unit) is forwarded with the context bound, and left out when it has none" {
+    const Idle = struct {
+        units: usize = 0,
+        fn pending(p: *anyopaque) bool {
+            const me: *@This() = @ptrCast(@alignCast(p));
+            return me.units < 2;
+        }
+        fn idle(p: *anyopaque) void {
+            const me: *@This() = @ptrCast(@alignCast(p));
+            me.units += 1;
+        }
+    };
+    const H = struct {
+        inner: be.Backend,
+        binds: usize = 0,
+        pub fn bind(p: *anyopaque) *@This() {
+            const me: *@This() = @ptrCast(@alignCast(p));
+            me.binds += 1;
+            return me;
+        }
+    };
+    var fake: lanes.fake.Fake = .{ .gpa = std.testing.allocator };
+    defer fake.deinit();
+    var work: Idle = .{};
+    var v = fake.backend().vtable.*;
+    try std.testing.expect(vtable(H, v).idle == null and vtable(H, v).idle_pending == null);
+    v.idle_pending = Idle.pending;
+    v.idle = Idle.idle;
+    var h: H = .{ .inner = .{ .ptr = &work, .vtable = &v } };
+    const w = vtable(H, v);
+    while (w.idle_pending.?(&h)) w.idle.?(&h);
+    try std.testing.expectEqual(@as(usize, 2), work.units);
+    try std.testing.expectEqual(@as(usize, 5), h.binds); // three asks and two units, each bound
 }
 
 test "every entry the family's backend gives is forwarded, and none it leaves out (a stepped prompt pass included)" {

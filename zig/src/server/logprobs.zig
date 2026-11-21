@@ -11,7 +11,8 @@ const Allocator = std.mem.Allocator;
 
 /// The rows are cut where the text is: after the end-of-thinking token, which must be a token of its own.
 pub fn admit(srv: *Server, cx: *Cx, thinking: bool, think_budget: u32, count: u8) errors.Refused!u8 {
-    if (thinking and srv.text.tokenId(srv.markers.close) == null) return cx.refuse("logprobs with thinking on need the template's end-of-thinking marker as one token");
+    // Inkling 2's rows are its content parts' tokens (chat_inkling2.zig), which no end-of-thinking token bounds
+    if (thinking and srv.text.vtable.format != .inkling2 and srv.text.tokenId(srv.markers.close) == null) return cx.refuse("logprobs with thinking on need the template's end-of-thinking marker as one token");
     if (think_budget > 0) return cx.refuse("logprobs support chat without tools, stop strings, structured output or a thinking budget");
     return count;
 }
@@ -24,6 +25,26 @@ pub fn value(srv: *Server, cx: *Cx, a: Allocator, thinking: bool, tokens: []cons
         error.OutOfMemory => error.OutOfMemory,
         error.Failed => cx.other("the logprob rows are out of step with the reply's tokens, or a forced token has none"),
     });
+}
+
+/// ``choices[0].logprobs`` for the reply tokens at ``at``: a typed-part reply's content tokens (Inkling 2).
+pub fn valueAt(srv: *Server, cx: *Cx, a: Allocator, tokens: []const u32, rows: []const api.LogprobRow, at: []const usize) errors.Refused!Value {
+    if (rows.len < tokens.len) return cx.other("the engine gave fewer logprob rows than reply tokens");
+    const ids, const picked = try pick(a, tokens, rows, at);
+    return wrap(a, entries(srv, a, ids, picked) catch |e| return switch (e) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.Failed => cx.other("the logprob rows are out of step with the reply's tokens, or a forced token has none"),
+    });
+}
+
+fn pick(a: Allocator, tokens: []const u32, rows: []const api.LogprobRow, at: []const usize) Allocator.Error!struct { []u32, []api.LogprobRow } {
+    const ids = try a.alloc(u32, at.len);
+    const picked = try a.alloc(api.LogprobRow, at.len);
+    for (at, ids, picked) |i, *id, *row| {
+        id.* = tokens[i];
+        row.* = rows[i];
+    }
+    return .{ ids, picked };
 }
 
 /// A streamed reply's rows: each content chunk carries those of the answer tokens its text now spells.
@@ -48,20 +69,37 @@ pub const Stream = struct {
             }
             if (ready > 0) {
                 const from = start + st.sent;
-                const lp = try wrap(a, try entries(srv, a, tokens[from..][0..ready], st.rows.items[from..][0..ready]));
                 st.sent += ready;
-                const o = try json.newObject(a);
-                try o.put(a, "content", .{ .string = text });
-                try o.put(a, "logprobs", lp);
-                return .{ .object = o };
+                return chunk(srv, a, text, tokens[from..][0..ready], st.rows.items[from..][0..ready]);
             }
         }
-        if (text.len == 0) return null;
-        const o = try json.newObject(a);
-        try o.put(a, "content", .{ .string = text });
-        return .{ .object = o };
+        return chunk(srv, a, text, &.{}, &.{});
+    }
+
+    /// ``delta`` for a reply whose content is the tokens at ``at`` of ``collected`` (Inkling 2's content parts).
+    pub fn deltaAt(st: *Stream, srv: *Server, a: Allocator, collected: []const u32, at: []const usize, text: []const u8, streamed: usize, done: bool) error{ Failed, OutOfMemory }!?Value {
+        if (st.rows.items.len < collected.len) return error.Failed;
+        var ready: usize = 0;
+        for (at[st.sent..]) |i| {
+            const bytes = (try srv.text.tokenBytes(a, collected[i])) orelse &.{};
+            if (!done and st.spelled + bytes.len > streamed) break;
+            st.spelled += bytes.len;
+            ready += 1;
+        }
+        const ids, const picked = try pick(a, collected, st.rows.items, at[st.sent..][0..ready]);
+        st.sent += ready;
+        return chunk(srv, a, text, ids, picked);
     }
 };
+
+/// ``{content, logprobs}`` with the rows of ``tokens``, ``{content}`` without any; null: neither.
+fn chunk(srv: *Server, a: Allocator, text: []const u8, tokens: []const u32, rows: []const api.LogprobRow) error{ Failed, OutOfMemory }!?Value {
+    if (tokens.len == 0 and text.len == 0) return null;
+    const o = try json.newObject(a);
+    try o.put(a, "content", .{ .string = text });
+    if (tokens.len > 0) try o.put(a, "logprobs", try wrap(a, try entries(srv, a, tokens, rows)));
+    return .{ .object = o };
+}
 
 /// ``/v1/completions``' legacy ``logprobs`` from the chat form's rows; ``text_offset`` counts on from `offset` chars.
 pub fn legacy(a: Allocator, rows: Value, offset: *usize) Allocator.Error!Value {

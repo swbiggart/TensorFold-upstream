@@ -34,6 +34,7 @@ pub fn renderIds(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, t
 }
 
 pub fn renderRequest(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, thinking: bool, effort: ?[]const u8, generation: bool, require_off: bool) errors.Refused![]const u32 {
+    const inkling2 = srv.text.vtable.format == .inkling2;
     const messages_in = if (srv.text.vtable.format == .kimi) messages else try messages_mod.normalizeWith(cx, messages, srv.late_system, srv.needs_user_after_tool, srv.media());
     const normalized = if (srv.text.vtable.format == .kimi or srv.text.native_deepseek) messages_in else try messages_mod.toolArguments(cx, messages_in);
     var problem: []const u8 = "";
@@ -41,7 +42,8 @@ pub fn renderRequest(srv: *Server, cx: *Cx, messages: Value, tools: []const Valu
         .tools = if (tools.len > 0) Value{ .array = @constCast(tools) } else null,
         .add_generation_prompt = generation,
         .enable_thinking = thinking,
-        .reasoning_effort = if (thinking) effort else null,
+        // Inkling 2's template reads only its effort line: thinking off is effort "none" (0), not a missing effort (0.9)
+        .reasoning_effort = if (inkling2) @import("inkling2_reply.zig").templateEffort(thinking, effort) else if (thinking) effort else null,
         .clear_thinking = cx.clear_thinking,
         .tool_choice = cx.template_fields.get("tool_choice"),
         .response_format = cx.template_fields.get("response_format"),

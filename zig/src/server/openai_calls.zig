@@ -21,7 +21,10 @@ pub fn attach(r: anytype, reply: *chat.Reply) Allocator.Error!?[]Value {
         reply.content = try r.plan.policy.parsedContent(r.a, reply.content);
         reply.finish_reason = "tool_calls";
         reply.tool_calls_streamed = false;
-        return if (r.plan.policy.single and calls.len > 1) calls[0..1] else calls;
+        const kept = if (r.plan.policy.single and calls.len > 1) calls[0..1] else calls;
+        // a native parser that names no ids (Inkling 2's) takes the request's ids, as the shared parser's calls do
+        for (kept, 0..) |c, i| if (c == .object and !c.object.contains("id")) try c.object.put(r.a, "id", .{ .string = try r.call_ids.id(r.a, choice, i) });
+        return kept;
     }
     const parsed = try tool_parse.parse(r.a, reply.content, tools, r.plan.policy.maxCalls());
     if (parsed.rejected_envelopes > 0) log.line("warning: kept {d} malformed or unoffered tool envelopes as content", .{parsed.rejected_envelopes});

@@ -9,7 +9,7 @@ const Snapshot = struct {
     entries: std.ArrayList(*const pc.Entry) = .empty,
     promised: reserve.Room = .{},
 
-    fn init(h: *LaneHost, current: *Job) !Snapshot {
+    fn init(h: *LaneHost, current: ?*Job) !Snapshot {
         var out: Snapshot = .{};
         errdefer out.entries.deinit(h.gpa);
         h.lock();
@@ -25,7 +25,7 @@ const Snapshot = struct {
         return out;
     }
 
-    fn protect(out: *Snapshot, h: *LaneHost, current: *Job, job: *Job) !void {
+    fn protect(out: *Snapshot, h: *LaneHost, current: ?*Job, job: *Job) !void {
         for (h.cache.?.by_position.items) |e| if (!e.expired and
             h.cache.?.usable(e.at, job.request.chunks) and extends(current, job, e))
         {
@@ -55,6 +55,19 @@ pub fn lookup(h: *LaneHost, job: *Job) !pc.Lookup {
     errdefer job.cache_promise = .{};
     const r = job.request;
     return store.lookupUserFrame(h.gpa, job.cacheKey(), r.bornLen(), r.history_len, r.rewind_len, r.user_end, r.shared_prefixes, r.chunks, h.spans(r), r.images, job.frame);
+}
+
+/// A backend that keeps prompts on its own pages (Inkling-2's KV page pool) has kept states give their pages back,
+/// least valuable first, never `restoring` nor a borrowed one nor one a queued or admitted request will resume
+/// (protected as a lookup protects them), until `left.fits()`. Engine thread, outside the host's lock.
+pub fn giveBack(h: *LaneHost, restoring: ?pc.Saved, left: anytype) bool {
+    const store = h.cache orelse return false;
+    var snapshot = Snapshot.init(h, null) catch return store.giveBack(restoring, &.{}, left);
+    defer snapshot.entries.deinit(h.gpa);
+    const before = store.reservation_guard;
+    store.reservation_guard = snapshot.guard();
+    defer store.reservation_guard = before;
+    return store.giveBack(restoring, &.{}, left);
 }
 
 /// Complete a promised keep without spending room another admitted pass has already claimed.
@@ -87,7 +100,7 @@ pub fn keep(h: *LaneHost, job: *Job, stream: *anyopaque, at: u32) void {
     if (job.marks.len == 0 or at >= job.marks[job.marks.len - 1]) job.cache_promise = .{};
 }
 
-fn extends(current: *const Job, job: *const Job, e: *const pc.Entry) bool {
+fn extends(current: ?*const Job, job: *const Job, e: *const pc.Entry) bool {
     const r = job.request;
     if (job == current or r.promptOnly() or r.prompt_logprobs != null or r.untaught) return false;
     if (job.started and job.entry == null) return false;

@@ -390,6 +390,7 @@ pub const MemorySource = struct {
 };
 
 pub const HealthSource = @import("engine_status.zig").HealthSource;
+pub const KvSource = @import("engine_status.zig").KvSource;
 pub const Status = @import("engine_status.zig").Status;
 
 pub const SubmitError = error{ Closed, Busy, InvalidSpans, Stale, InvalidRequest, MemoryPressure }; // Stale: put-back has not reached the device
