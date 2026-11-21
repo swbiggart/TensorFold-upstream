@@ -173,6 +173,14 @@ def decode_cases(ids_per_text, size, seed):
     return cases
 
 
+def texts_of(path):
+    """Strings from a JSON list, or the rendered prompts of a template_parity.py corpus.json."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(data, dict):
+        return [case["text"] for case in data.get("cases", []) if case.get("ok") and case.get("text")]
+    return [text for text in data if isinstance(text, str)]
+
+
 def run_native(checker, tokenizer, encode, decode, tag):
     OUT.mkdir(parents=True, exist_ok=True)
     cases_path, out_path = OUT / f"{tag}-cases.json", OUT / f"{tag}-native.json"
@@ -206,13 +214,13 @@ def shrink(checker, path, tok, case):
     return join(units)
 
 
-def check(checker, name, path, digest, seed):
+def check(checker, name, path, digest, seed, extra=()):
     from tokenizers import Tokenizer
     started = time.perf_counter()
     tok = Tokenizer.from_file(str(path))
     load_ms = (time.perf_counter() - started) * 1e3
     added = [t["content"] for t in json.loads(path.read_text()).get("added_tokens", [])]
-    encode = corpus(added, seed)
+    encode = corpus(added, seed) + [t.encode() for t in extra]
     started = time.perf_counter()
     want = reference(tok, encode)
     py_encode_ms = (time.perf_counter() - started) * 1e3
@@ -251,6 +259,8 @@ def main():
     parser.add_argument("--seed", type=int, default=20261003)
     parser.add_argument("--match", default="", help="only tokenizers whose name contains this")
     parser.add_argument("--no-synthetic", action="store_true", help="skip the trained feature-coverage tokenizers")
+    parser.add_argument("--texts", action="append", default=[], help="JSON file: a list of strings (or template_parity "
+                        "corpus.json, whose rendered prompts are used) to encode as well (repeatable)")
     args = parser.parse_args()
     if not args.no_synthetic:
         args.tokenizer += synthetic(args.seed)
@@ -261,7 +271,8 @@ def main():
         subprocess.run([args.zig, "build-exe", "zig/src/core/tokenizer/check.zig", "-O", "ReleaseSafe",
                         f"-femit-bin={checker}"], cwd=ROOT, check=True)
     found = [entry for entry in discover(args.tokenizer) if args.match in entry[0]]
-    results = [check(checker, name, path, digest, args.seed) for name, path, digest in found]
+    extra = [text for path in args.texts for text in texts_of(Path(path))]
+    results = [check(checker, name, path, digest, args.seed, extra) for name, path, digest in found]
     report = {"tokenizers_version": tokenizers.__version__, "seed": args.seed, "results": results}
     (OUT / "parity.json").write_text(json.dumps(report, indent=2, ensure_ascii=False))
     for r in results:
