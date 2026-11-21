@@ -111,6 +111,8 @@ fn openedCommitted(e: *Engine, s: *Stream, reach: Reach, hook: ?be.Committed) !v
         const requests = try @import("root_copy.zig").prepare(e, &.{.{ .stream = s, .follow = &.{}, .first = feed, .rows = null, .start = s.prompt_len, .position = position + 1, .depth = wanted }});
         var d = requests[0].depth;
         asked = d;
+        s.asked = d; // the first block's budget (shared_cut's feed rule reads it)
+        s.deepened = false;
         try e.backend.draftIn(e.arena.allocator(), requests);
         if (e.backend.proposals()) d = requests[0].heldDepth(e.backend);
         s.dropHeld(e.gpa);

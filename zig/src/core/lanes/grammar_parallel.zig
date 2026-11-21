@@ -69,7 +69,10 @@ pub fn independent(plans: []const Plan) bool {
 pub fn constrain(e: anytype, plans: []Plan) !void {
     var count: usize = 0;
     var runnable: usize = 0;
+    // the backend masks a late plan's rows after its verify (Backend.late_masks): no walk here
+    for (plans) |*p| p.late_masks = window.late(e, p);
     for (plans) |p| if (p.stream.grammar) |c| {
+        if (p.late_masks) continue;
         count += 1;
         const reaches = c.active or p.held > 0 or std.mem.indexOfScalar(u32, p.tokens, c.after.?) != null;
         runnable += @intFromBool(!c.finished() and reaches);
@@ -84,7 +87,7 @@ pub fn constrain(e: anytype, plans: []Plan) !void {
     try pool.reserve(e.gpa, count);
     var at: usize = 0;
     // Held GPU drafts, row allocation and every engine/backend access run on the owner before dispatch.
-    for (plans) |*p| if (p.stream.grammar != null) {
+    for (plans) |*p| if (p.stream.grammar != null and !p.late_masks) {
         const j = &pool.jobs.items[at];
         j.prepared = try window.prepare(e, p);
         j.profile = .{ .clock = e.clock };
@@ -98,7 +101,7 @@ pub fn constrain(e: anytype, plans: []Plan) !void {
     try group.await(io);
     at = 0;
     // Matchers and job arenas stay live through the join; results and errors are consumed in stream order.
-    for (plans) |*p| if (p.stream.grammar != null) {
+    for (plans) |*p| if (p.stream.grammar != null and !p.late_masks) {
         const j = &pool.jobs.items[at];
         timing.record(e, p.stream, j.profile);
         const w = try j.result;

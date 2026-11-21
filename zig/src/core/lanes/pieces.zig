@@ -118,6 +118,8 @@ fn joined(e: *Engine, s: *Stream) !void {
     try e.backend.draftIn(e.arena.allocator(), &.{.{ .stream = s, .follow = &.{}, .first = .{ .value = last }, .rows = null, .start = s.cache_len, .position = position, .depth = d }});
     s.dropHeld(e.gpa);
     s.next = .{ .count = if (e.backend.proposals()) s.proposal_depth orelse d else d };
+    s.asked = d; // the first block's budget (shared_cut's feed rule reads it)
+    s.deepened = false;
     try trail.event(e, &.{ f("ev", str("draft")), f("stream", str(s.id)), f("depth", int(d)), f("position", int(position)), f("follow", .{ .u32s = &.{last} }), f("rows", .null) });
     try trail.resolve(e);
     try e.live.append(e.gpa, s);
@@ -128,6 +130,8 @@ fn joinedDrafted(e: *Engine, r: be.DraftRequest) !void {
     const s = r.stream;
     s.dropHeld(e.gpa);
     s.next = .{ .count = r.heldDepth(e.backend) };
+    s.asked = r.depth; // the first block's budget (shared_cut's feed rule reads it)
+    s.deepened = false;
     try trail.event(e, &.{ f("ev", str("draft")), f("stream", str(s.id)), f("depth", int(r.depth)), f("position", int(r.position)), f("follow", .{ .u32s = &.{s.pending.?} }), f("rows", .null) });
     try trail.resolve(e);
     try e.live.append(e.gpa, s);

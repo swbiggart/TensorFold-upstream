@@ -18,6 +18,7 @@ pub const Window = struct {
     positions: []const u64, // the absolute position each row's draw is keyed at
     early: bool = false, // also draft each row's first head draft behind the verify (speculate_early)
     masks: []const u32 = &.{}, // structured output: each row's allowed-token bits (rows x words, lanes/grammar.zig); empty: none
+    late_masks: bool = false, // structured output: a grammar stream's held chain sent unread; the backend masks its rows (Backend.late_masks)
 
     pub fn rows(w: Window) usize {
         return 1 + @as(usize, w.held) + w.tokens.len;
@@ -82,6 +83,12 @@ pub const Backend = struct {
     penalties: bool = false,
     /// Prompt fill gives the same tokens at any chunk cut, so --decode-share may cap its chunk rows; wrappers copy it.
     chunk_invariant: bool = false,
+    /// Structured output with held drafts made inside the verify's own step: a grammar stream's window of a held chain
+    /// goes out without reading its drafts back first (Window.late_masks, no masks), and the backend draws its rows
+    /// under `Constraint.late` over the pending token and the drafts the step made, once they are on the host. A
+    /// grammar stream then drafts in the round's shared pass like any other instead of a pass of its own before its
+    /// window; the grammar's own drafts past the chain are not added. Wrappers leave it off.
+    late_masks: bool = false,
     ptr: *anyopaque,
     vtable: *const VTable,
 
@@ -119,6 +126,10 @@ pub const Backend = struct {
         unspeculate: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!void = null,
         /// Each held draft's chance of landing, for heads that give them; false when it has none.
         probabilities: ?*const fn (ptr: *anyopaque, s: *Stream, out: []f64) anyerror!bool = null,
+        /// shared_cut: before each verify, whether this round prices its drafts by chances (a shared round with 2 .. 4
+        /// live streams, Engine.shared_open): a backend that runs left-out streams' deferred drafts reads their chances
+        /// only then (else v0.2's proposals-only run).
+        shared_round: ?*const fn (ptr: *anyopaque, open: bool) void = null,
         /// A tree head's held drafts as host tokens and parents (gpa-owned), read where Python reads them.
         tree: ?*const fn (ptr: *anyopaque, s: *Stream, gpa: std.mem.Allocator) anyerror!?Held = null,
         /// The head's best tokens and probabilities at each level it drafted for the stream (waits for the drafts).
@@ -145,6 +156,10 @@ pub const Backend = struct {
         reports_fill: bool = false,
         /// The stream left the rounds: free its caches and held drafts.
         release: *const fn (ptr: *anyopaque, s: *Stream) void,
+        /// Idle work the backend does in units while no stream is live and nothing waits (a family's write-behind):
+        /// `idle_pending` says whether any is left (cheap, under the host's lock), `idle` does one unit (unlocked).
+        idle_pending: ?*const fn (ptr: *anyopaque) bool = null,
+        idle: ?*const fn (ptr: *anyopaque) void = null,
         /// A prompt in pieces between rounds (`Rounds`) instead of `prefill`: begin, pieces, finish; null: whole only.
         begin: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!Begun = null,
         piece: ?*const fn (ptr: *anyopaque, s: *Stream, start: u64, end: u64, save: bool) anyerror!void = null,

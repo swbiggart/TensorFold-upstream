@@ -69,6 +69,10 @@ pub const Fake = struct {
     many_streams: usize = 0, // streams those calls prefilled
     prefill_hook: ?*const fn (ctx: *anyopaque, s: *Stream, chunk: usize) void = null,
     prefill_hook_ctx: ?*anyopaque = null,
+    // a stepped prompt call that runs other work than its rows first (an image's tower unit): its ns when it does, and
+    // the call returns with no rows filled
+    side_hook: ?*const fn (ctx: *anyopaque, s: *Stream, max_rows: u32) ?u64 = null,
+    side_hook_ctx: ?*anyopaque = null,
     release_hook: ?*const fn (ctx: *anyopaque, s: *Stream) void = null, // after a stream's release, as a backend ending another
     release_hook_ctx: ?*anyopaque = null,
     refuse_sampled: bool = false, // prefill refuses a sampled stream with error.SamplingRefused
@@ -92,6 +96,9 @@ pub const Fake = struct {
     image_rows: usize = 0, // image rows fed (`image_words`): the rows a tower had to make
     gpu_charge: ?f64 = null, // each verify and step charges its streams this many GPU seconds, as a timed backend does
     head_accepts: ?usize = null, // head drafts a round right before one wrong (null: one in five wrong)
+    late_masks: bool = false, // Backend.late_masks: a late window's rows masked here, after its held drafts are known
+    late_windows: usize = 0, // late windows verified, and their rows past the grammar's (drawn unconstrained)
+    late_free_rows: usize = 0,
 
     pub fn deinit(x: *Fake) void {
         var it = x.lanes.valueIterator();
@@ -108,7 +115,7 @@ pub const Fake = struct {
     }
 
     pub fn backend(x: *Fake) be.Backend {
-        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .features = features, .release = release, .first_row = firstRow, .alternatives = alternatives, .held = heldDrafts, .reports_fill = true }, .chunk_invariant = true };
+        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .features = features, .release = release, .first_row = firstRow, .alternatives = alternatives, .held = heldDrafts, .reports_fill = true }, .chunk_invariant = true, .late_masks = x.late_masks };
     }
 
     /// The same target taking several prompts in one pass (`prefill_many`).
@@ -307,6 +314,10 @@ pub const Fake = struct {
         x.prefill_count += 1;
         if (x.prefill_hook) |hook| hook(x.prefill_hook_ctx.?, s, l.filled);
         if (s.isCancelled()) return error.Cancelled;
+        if (x.side_hook) |hook| if (hook(x.side_hook_ctx.?, s, max_rows)) |ns| {
+            s.side_ns = ns;
+            return false;
+        };
         l.filled += 1;
         const chunks: usize = @intCast(chunksFor(s.prompt_len, x.prefill_chunks, max_rows));
         const at = @min(@as(u64, @intCast(s.prompt_len)), s.prompt_len * l.filled / @as(u64, @intCast(chunks)));
@@ -456,6 +467,19 @@ pub const Fake = struct {
             @memcpy(o.drafts, l.rows.items[1..]);
             const parents = if (w.parents) |ps| try x.gpa.dupe(i32, ps) else try accept.rowParents(x.gpa, l.rows.items.len, null);
             defer x.gpa.free(parents);
+            // a late window: the grammar walks the pending token and the held drafts now (Constraint.late)
+            var late_arena: std.heap.ArenaAllocator = .init(x.gpa);
+            defer late_arena.deinit();
+            var masks = w.masks;
+            var masked_rows = l.rows.items.len;
+            if (w.late_masks) {
+                if (w.masks.len > 0 or w.tokens.len > 0 or w.parents != null) return error.LateWindowShape;
+                const gw = try w.stream.grammar.?.late(late_arena.allocator(), l.rows.items);
+                masks = gw.masks;
+                masked_rows = gw.rows.len;
+                x.late_windows += 1;
+                x.late_free_rows += l.rows.items.len - masked_rows;
+            }
             for (0..l.rows.items.len) |r| {
                 // each row reads the cache and its own path from the pending row
                 l.history.shrinkRetainingCapacity(l.base);
@@ -466,9 +490,9 @@ pub const Fake = struct {
                 try l.history.appendSlice(x.gpa, path.items);
                 if (w.positions[r] != l.history.items.len) return error.PositionMismatch;
                 o.sampled[r] = x.targetNext(l.history.items, w.stream.sampling, w.positions[r]);
-                if (w.masks.len > 0) {
-                    const words = w.masks.len / l.rows.items.len;
-                    o.sampled[r] = try allowed(o.sampled[r], w.masks[r * words ..][0..words]);
+                if (masks.len > 0 and r < masked_rows) {
+                    const words = masks.len / masked_rows;
+                    o.sampled[r] = try allowed(o.sampled[r], masks[r * words ..][0..words]);
                 }
                 if (o.rows.len > 0) o.rows[r] = rowAt(l.history.items, o.sampled[r], w.stream.logprobs.?);
             }

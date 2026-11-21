@@ -1,5 +1,7 @@
 //! One stream (Python LaneStream) and the round loop's state for it (Python's dicts keyed by stream id).
 const std = @import("std");
+/// Buckets of the per-request draft counts (Stream.depth_rounds): drafts 0 .. 7, the last also deeper.
+pub const depth_buckets = 8;
 const grammar = @import("grammar.zig");
 const shape = @import("shape.zig");
 const plan_lanes = @import("plan_lanes.zig");
@@ -111,6 +113,8 @@ pub const Image = struct {
     /// Visible pixel height and width before padding, for towers with content-normalized positions.
     content_size: ?[2]u32 = null,
     hash: u64 = 0, // core/picture/identity.zig's: the bytes and the grid, as the prompt cache's key names the image
+    /// The family's full identity of the image (SHA-256 of its decoded pixels); zeros: none, `hash` alone names it.
+    digest: [32]u8 = @splat(0),
 };
 
 pub const Spec = struct {
@@ -209,6 +213,9 @@ pub const Stream = struct {
     cost_probe_trial: ?@import("lone_costs.zig").Trial = null, // priced selection, consumed only by its completed width
     shared_round: bool = false, // a round beside another stream: its times are not this stream's alone
     settle_step: bool = false, // the lane host bills this prompt step's time to decoders: end it on the device
+    side_ns: u64 = 0, // the backend's last prompt call ran other work than its rows (an image's tower unit), ended on the device: its ns
+    side_held: bool = false, // the lane host holds side work this call (decode time is owed): a capped tower unit waits; rows and stored images do not
+    side_wait: bool = false, // the backend's last prompt call ran nothing: its side work waited on side_held
     prices_seeded: bool = false, // its own prices started from the engine's kept calibration
     copy_landed: [2]f64 = .{ -1, -1 }, // a lone context copy's rows that landed, decayed, by short and long match (-1: unprimed)
     copy_broke: [2]f64 = .{ 0, 0 }, // and its chains that broke before their end: their ratio is a copied row's landing rate
@@ -234,14 +241,25 @@ pub const Stream = struct {
     grammar_time: @import("grammar_time.zig").Sum = .{},
     grammar_round: @import("grammar_time.zig").Round = .{},
     gpu_seconds: ?f64 = null, // a timed backend's passes this stream ran in (TF_Q27_PROFILE); null: untimed
+    depth_rounds: [depth_buckets]u32 = @splat(0), // drafted rounds by drafts verified (rows - 1; the last bucket: that or more)
+    depth_kept: [depth_buckets]u32 = @splat(0), // and the drafts they accepted
+    kept_rounds: [depth_buckets]u32 = @splat(0), // drafted rounds by drafts accepted (the last bucket: that or more)
+    stale_drafts: u32 = 0, // the backend's drafts made from another forward's taps than the stream's own last one
+    draft_gap_ns: u64 = 0, // the backend's host time from a draft's return to the stream's next verify (summed)
+    draft_gaps: u32 = 0,
     paused: bool = false,
     depth: ?State = null,
+    cut_arm: bool = false, // lone_cut A/B tooling: the backend's cut arm, its rounds timed apart (Who.cut_arm)
     mode: ?Mode = null,
     next: ?Held = null,
     inflight: ?u64 = null,
     served: ?u64 = null,
     proposal_depth: ?u32 = null, // null: legacy; otherwise the last routed request, zero until it succeeds
     granted: ?u32 = null,
+    asked: u32 = 0, // shared_cut: the drafts the rule's budget asked of the last shared draft, before `deepen`
+    deepened: bool = false, // shared_cut `deepen`: the held block was drafted past `asked`; only a chance-priced round verifies past it
+    no_chances: bool = false, // shared_cut: the backend reads no chances for this stream's drafts (an A/B arm without them), so it is neither deepened nor chance-priced
+
     grant_short: bool = false, // the last grant verified fewer drafts than the stream held
     grant_gain: ?f64 = null, // the drafts its last grant expected to keep (the chances it was priced by)
     draft_chances: std.ArrayList(f64) = .empty, // last full head prices, retained through zero-row rounds
@@ -317,6 +335,8 @@ pub const Stream = struct {
         s.granted = null;
         s.grant_short = false;
         s.grant_gain = null;
+        s.asked = 0;
+        s.deepened = false;
         s.draft_chances.deinit(gpa);
         s.draft_chances = .empty;
         s.copy_width = null;
